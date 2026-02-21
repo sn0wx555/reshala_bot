@@ -698,7 +698,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS player_birthdays (
                     user_id INTEGER PRIMARY KEY,
                     birthday DATE NOT NULL,
-                    last_celebrated YEAR,
+                    last_celebrated INTEGER,
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 )
             """)
@@ -996,7 +996,7 @@ class Database:
     # ==================== РОЛИ В КЛАНЕ ====================
 
     async def set_clan_role(self, clan_id: int, user_id: int, role: str):
-        """Установить роль в клане"""
+        """Установить р��ль в клане"""
         await self._ensure_connection()
         await self.conn.execute(
             "INSERT OR REPLACE INTO clan_roles (clan_id, user_id, role) VALUES (?, ?, ?)",
@@ -1135,18 +1135,28 @@ class Database:
             (war_id, attacker_id, defender_id, damage)
         )
         async with self.conn.execute("SELECT clan_id FROM users WHERE id = ?", (attacker_id,)) as cursor:
-            attacker_clan = (await cursor.fetchone())[0]
+            result = await cursor.fetchone()
+            attacker_clan = result[0] if result else None
         async with self.conn.execute("SELECT clan_id FROM users WHERE id = ?", (defender_id,)) as cursor:
-            defender_clan = (await cursor.fetchone())[0]
+            result = await cursor.fetchone()
+            defender_clan = result[0] if result else None
+        
         if attacker_clan:
-            await self.conn.execute(
-                "UPDATE wars SET clan1_damage = clan1_damage + ? WHERE id = ? AND clan1_id = ?",
-                (damage, war_id, attacker_clan)
-            )
-            await self.conn.execute(
-                "UPDATE wars SET clan2_damage = clan2_damage + ? WHERE id = ? AND clan2_id = ?",
-                (damage, war_id, attacker_clan)
-            )
+            # Получить информацию о войне для определения, какой клан первый
+            async with self.conn.execute("SELECT clan1_id FROM wars WHERE id = ?", (war_id,)) as cursor:
+                war_result = await cursor.fetchone()
+                clan1_id = war_result[0] if war_result else None
+            
+            if attacker_clan == clan1_id:
+                await self.conn.execute(
+                    "UPDATE wars SET clan1_damage = clan1_damage + ? WHERE id = ?",
+                    (damage, war_id)
+                )
+            else:
+                await self.conn.execute(
+                    "UPDATE wars SET clan2_damage = clan2_damage + ? WHERE id = ?",
+                    (damage, war_id)
+                )
         await self.conn.commit()
 
     async def finish_war(self, war_id: int) -> Optional[Dict]:
@@ -1336,7 +1346,7 @@ class Database:
     # ==================== ЛИЧНЫЕ ЦЕЛИ ====================
 
     async def create_personal_goal(self, user_id: int, goal_type: str, target_value: int, reward_influence: int, reward_aura: float = 0) -> Dict:
-        """Создать личную цель"""
+        """Создать ли��ную цель"""
         await self._ensure_connection()
         async with self.conn.execute(
             "INSERT INTO personal_goals (user_id, goal_type, target_value, reward_influence, reward_aura) VALUES (?, ?, ?, ?, ?) RETURNING *",
@@ -1491,7 +1501,7 @@ class Database:
             win = True
         
         result = 'win' if win else 'lose'
-        win_amount = bet_amount if win else 0
+        win_amount = bet_amount * 2 if win else 0
         
         await self.conn.execute(
             "UPDATE users SET influence = influence - ? WHERE id = ?", (bet_amount, user_id)
@@ -2135,6 +2145,7 @@ class Database:
                 "UPDATE users SET influence = influence - ?, aura = aura + ? WHERE id = ?",
                 (amount, aura_amount, user_id)
             )
+            await self.conn.commit()
             return {'from_type': 'influence', 'to_type': 'aura', 'from_amount': amount, 'to_amount': aura_amount}
         else:
             if user['aura'] < amount:
@@ -2144,6 +2155,7 @@ class Database:
                 "UPDATE users SET aura = aura - ?, influence = influence + ? WHERE id = ?",
                 (amount, influence_amount, user_id)
             )
+            await self.conn.commit()
             return {'from_type': 'aura', 'to_type': 'influence', 'from_amount': amount, 'to_amount': influence_amount}
 
     # ==================== СЕКРЕТНЫЕ КОМАНДЫ ====================
@@ -2389,7 +2401,7 @@ class Database:
         await self.conn.commit()
 
     async def check_invite_success(self, newbie_id: int) -> Optional[int]:
-        """Проверить, выполнены ли условия для успешного приглашения"""
+        """Проверить, выполнены ли условия для ус��ешного приглашения"""
         await self._ensure_connection()
         async with self.conn.execute(
             """SELECT inviter_id, messages_count, 
@@ -2706,8 +2718,8 @@ class Database:
             winners = await cursor.fetchall()
         if not winners:
             return
-        tour = await self.conn.execute("SELECT prize_pool_influence, prize_pool_aura FROM tournaments WHERE id = ?", (tournament_id,))
-        tour_row = await tour.fetchone()
+        async with self.conn.execute("SELECT prize_pool_influence, prize_pool_aura FROM tournaments WHERE id = ?", (tournament_id,)) as cursor:
+            tour_row = await cursor.fetchone()
         prize_inf = tour_row['prize_pool_influence']
         prize_aura = tour_row['prize_pool_aura']
         shares = [0.5, 0.3, 0.2]
@@ -2743,93 +2755,4 @@ class Database:
             clan['aura_treasury'] * price +
             members_influence * 0.5 +
             members_aura * price * 0.3 +
-            clan['wars_won'] * 100 -
-            clan['wars_lost'] * 50
-        )
-        return power
-
-    async def get_clans_by_power(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Получить рейтинг кланов по силе"""
-        await self._ensure_connection()
-        all_clans = await self.get_all_clans()
-        clans_with_power = []
-        for clan in all_clans:
-            power = await self.get_clan_power(clan['id'])
-            clan['power'] = power
-            clans_with_power.append(clan)
-        clans_with_power.sort(key=lambda x: x['power'], reverse=True)
-        return clans_with_power[:limit]
-
-    # ==================== ТОПЫ ====================
-
-    async def get_top_influence(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Топ по влиянию"""
-        await self._ensure_connection()
-        async with self.conn.execute(
-            "SELECT id, nickname, influence, aura, trust FROM users ORDER BY influence DESC LIMIT ?",
-            (limit,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def get_top_trust(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Топ по доверию"""
-        await self._ensure_connection()
-        async with self.conn.execute(
-            "SELECT id, nickname, trust FROM users ORDER BY trust DESC LIMIT ?",
-            (limit,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def get_top_aura(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Топ по ауре"""
-        await self._ensure_connection()
-        async with self.conn.execute(
-            "SELECT id, nickname, aura FROM users ORDER BY aura DESC LIMIT ?",
-            (limit,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    async def get_top_clans(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Топ кланов по богатству"""
-        await self._ensure_connection()
-        price = await self.get_current_aura_price()
-        async with self.conn.execute(
-            """SELECT c.*, COUNT(cm.user_id) as member_count,
-                      (c.influence_treasury + c.aura_treasury * ?) as total_wealth
-               FROM clans c
-               LEFT JOIN clan_members cm ON c.id = cm.clan_id
-               GROUP BY c.id
-               ORDER BY total_wealth DESC
-               LIMIT ?""",
-            (price, limit)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
-
-    # ==================== ОЧИСТКА ====================
-
-    async def clean_expired_deals(self) -> int:
-        """Очистить просроченные сделки"""
-        await self._ensure_connection()
-        async with self.conn.execute(
-            "UPDATE deals SET status = 'cancelled' WHERE status = 'pending' AND expires_at < datetime('now') RETURNING id"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            await self.conn.commit()
-            return len(rows)
-
-    async def clean_old_cooldowns(self, hours: int = 24):
-        """Очистить старые кулдауны"""
-        await self._ensure_connection()
-        await self.conn.execute(
-            "DELETE FROM cooldowns WHERE last_action < datetime('now', ?)",
-            (f'-{hours} hours',)
-        )
-        await self.conn.commit()
-
-
-# Global instance
-db = Database()
+            clan['wars_won'] * 100
