@@ -947,6 +947,13 @@ async def on_shutdown():
 
 
 async def main():
+    # 👇 РЕГИСТРИРУЕМ STARTUP И SHUTDOWN (это было пропущено!)
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    # 👇 ЯВНО ПОДКЛЮЧАЕМ MIDDLEWARE (для надёжности)
+    dp.message.middleware(ProtectionMiddleware())
+
     # Получаем порт от Render
     PORT = int(os.getenv("PORT", 8000))
     RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
