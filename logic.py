@@ -6,10 +6,6 @@ from database import db
 import random
 from config import *
 
-# Импорт констант для защиты от спама
-from config import SPAM_COOLDOWN, SPAM_PENALTY
-
-
 class GameLogic:
     @staticmethod
     async def process_message(
@@ -27,8 +23,7 @@ class GameLogic:
         - начисляет влияние
         - проверяет инвайты
         - ежедневный бонус
-        - проверяет специальные триггеры (доверяю, сделка, создание клана, аура, профиль, топ,
-          альянсы, войны, достижения, карма, банк, шпионаж, турниры, уровень)
+        - проверяет специальные триггеры
         - проверяет защиту от спама
         """
         result = {
@@ -40,16 +35,18 @@ class GameLogic:
             'clan_power_request': False,
             'war_status_request': None,
             'clan_profile_request': None,
-            'spam_penalty': False,  # Новый флаг для определения спама
+            'achievements_request': False,
+            'level_request': False,
+            'events_request': False,
+            'black_market_request': False,
+            'spam_penalty': False,
         }
 
-        # Получаем или создаём пользователя
         user = await db.get_or_create_user(user_id, username, nickname)
 
         # Проверка на спам
         is_spam, last_time = await db.check_spam(user_id, SPAM_COOLDOWN)
         if is_spam:
-            # Штраф за спам - 3 влияния
             penalty = SPAM_PENALTY
             current_influence = user.get('influence', 0)
             if current_influence >= penalty:
@@ -60,12 +57,9 @@ class GameLogic:
                     'penalty': penalty,
                     'time_diff': SPAM_COOLDOWN
                 })
-                # Всё равно обновляем время последнего сообщения
-                await db.update_spam_record(user_id)
-                # Возвращаем результат без начисления влияния за сообщение
-                return result
+            await db.update_spam_record(user_id)
+            return result
         
-        # Обновляем время последнего сообщения
         await db.update_spam_record(user_id)
 
         # Проверяем активное глобальное событие (для модификаторов)
@@ -77,7 +71,6 @@ class GameLogic:
             inviter_id = await db.check_invite_success(user_id)
             if inviter_id:
                 await db.add_influence(inviter_id, INFLUENCE_PER_INVITE)
-                # Увеличиваем счётчик приглашений у пригласившего
                 inviter = await db.get_user(inviter_id)
                 await db.update_user(inviter_id, invites_count=inviter['invites_count'] + 1)
                 result['events'].append({
@@ -426,7 +419,7 @@ class GameLogic:
                 result['events'].append(boss_event)
 
         # Обмен внутри клана
-        exchange_match = re.search(r'обмен\s+(инфluence|аура)\s+([\d.]+)', text_lower)
+        exchange_match = re.search(r'обмен\s+(influence|аур��)\s+([\d.]+)', text_lower)
         if exchange_match:
             from_type = exchange_match.group(1)
             amount = float(exchange_match.group(2))
@@ -497,7 +490,7 @@ class GameLogic:
                 result['events'].append(auth_event)
 
         # Клан-ивенты
-        if text_lower in ('клановый ивент', ' Clan Event'):
+        if text_lower in ('клановый ивент', ' clan event'):
             clan_event = await GameLogic._handle_clan_event_info()
             if clan_event:
                 result['events'].append(clan_event)
@@ -1076,44 +1069,6 @@ class GameLogic:
             'newbie_messages': invite_info['messages_count'] if invite_info else 0
         }
 
-    # ==================== Новые функции: события ====================
-    
-    @staticmethod
-    async def get_events_text() -> str:
-        """Получить информацию об активных событиях"""
-        active_event = await db.get_active_event()
-        if not active_event:
-            return (
-                "🎉 <b>Событий сейчас нет</b>\n"
-                "━━━━━━━━━━━━━━━\n"
-                "Следите за новостями — события происходят случайно!"
-            )
-        
-        event_type = active_event['event_type']
-        multiplier = active_event['multiplier']
-        ends_at = datetime.fromisoformat(active_event['ends_at'])
-        time_left = ends_at - datetime.now()
-        hours = int(time_left.total_seconds() / 3600)
-        minutes = int((time_left.total_seconds() % 3600) / 60)
-        
-        descriptions = {
-            'bonus_hour': f"🎁 <b>БОНУСНЫЙ ЧАС!</b>\nВлияние за сообщения x{multiplier:.0f}!",
-            'black_market': f"🛒 <b>ЧЁРНЫЙ РЫНОК!</b>\nАура со скидкой {int((1-multiplier)*100)}%!",
-            'inflation': f"📈 <b>ИНФЛЯЦИЯ!</b>\nЦена ауры x{multiplier:.0f}!",
-            'deflation': f"📉 <b>ДЕФЛЯЦИЯ!</b>\nЦена ауры x{multiplier:.0f}!",
-            'double_trust': f"💚 <b>ДЕНЬ ДОВЕРИЯ!</b>\nДоверие x{multiplier:.0f}!",
-        }
-        
-        desc = descriptions.get(event_type, f"🎯 <b>{event_type}</b>\nМножитель: x{multiplier:.0f}")
-        
-        return (
-            f"{desc}\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"⏳ Осталось: {hours}ч {minutes}м"
-        )
-    
-    # ==================== НОВЫЕ ОБРАБОТЧИКИ ====================
-
     @staticmethod
     async def _handle_roulette(user_id: int, nick: str, bet_type: str, bet_amount: int) -> Optional[Dict]:
         """Рулетка - чёт/нечёт"""
@@ -1614,12 +1569,45 @@ class GameLogic:
         }
 
     @staticmethod
+    async def get_events_text() -> str:
+        """Получить информацию об активных событиях"""
+        active_event = await db.get_active_event()
+        if not active_event:
+            return (
+                "🎉 <b>Событий сейчас нет</b>\n"
+                "━━━━━━━━━━━━━━━\n"
+                "Следите за новостями — события происходят случайно!"
+            )
+        
+        event_type = active_event['event_type']
+        multiplier = active_event['multiplier']
+        ends_at = datetime.fromisoformat(active_event['ends_at'])
+        time_left = ends_at - datetime.now()
+        hours = int(time_left.total_seconds() / 3600)
+        minutes = int((time_left.total_seconds() % 3600) / 60)
+        
+        descriptions = {
+            'bonus_hour': f"🎁 <b>БОНУСНЫЙ ЧАС!</b>\nВлияние за сообщения x{multiplier:.0f}!",
+            'black_market': f"🛒 <b>ЧЁРНЫЙ РЫНОК!</b>\nАура со скидкой {int((1-multiplier)*100)}%!",
+            'inflation': f"📈 <b>ИНФЛЯЦИЯ!</b>\nЦена ауры x{multiplier:.0f}!",
+            'deflation': f"📉 <b>ДЕФЛЯЦИЯ!</b>\nЦена ауры x{multiplier:.0f}!",
+            'double_trust': f"💚 <b>ДЕНЬ ДОВЕРИЯ!</b>\nДоверие x{multiplier:.0f}!",
+        }
+        
+        desc = descriptions.get(event_type, f"🎯 <b>{event_type}</b>\nМножитель: x{multiplier:.0f}")
+        
+        return (
+            f"{desc}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"⏳ Осталось: {hours}ч {minutes}м"
+        )
+
+    @staticmethod
     async def get_black_market_text() -> str:
         """Получить информацию о черном рынке"""
         active_event = await db.get_active_event()
         
         if active_event and active_event['event_type'] == 'black_market':
-            # Черный рынок активен - показываем скидку
             discount = int((1 - active_event['multiplier']) * 100)
             current_price = await db.get_current_aura_price()
             discounted_price = current_price * active_event['multiplier']
@@ -1633,7 +1621,6 @@ class GameLogic:
                 f"📝 Продать: \"продать аура 10\""
             )
         else:
-            # Черный рынок не активен
             current_price = await db.get_current_aura_price()
             return (
                 f"🛒 <b>ЧЁРНЫЙ РЫНОК</b>\n"
@@ -1643,67 +1630,43 @@ class GameLogic:
                 f"🔔 Следите за событиями — черный рынок "
                 f"открывается случайно!"
             )
-    
+
     @staticmethod
-    async def trigger_random_event() -> Optional[Dict]:
-        """Запустить случайное событие (вызывается периодически)"""
-        import random
-        
-        # Шансы на событие (10% каждый час)
-        if random.random() > 0.1:
-            return None
-        
-        events = [
-            ('bonus_hour', 'Бонусный час', 2.0, 1),  # 2x влияние, 1 час
-            ('black_market', 'Чёрный рынок', 0.5, 3),  # 50% скидка, 3 часа
-            ('inflation', 'Инфляция', 1.5, 10),  # 1.5x цена, 10 минут
-            ('deflation', 'Дефляция', 0.8, 10),  # 0.8x цена, 10 минут
-            ('double_trust', 'День доверия', 2.0, 1),  # 2x доверие, 1 час
-        ]
-        
-        event = random.choice(events)
-        await db.create_global_event(event[0], event[1], event[2], event[3])
-        
-        return {
-            'type': 'random_event',
-            'event_type': event[0],
-            'description': event[1],
-            'duration_hours': event[3]
-        }
-    
-    @staticmethod
-    async def get_level_text(user_id: int) -> str:
+    async def get_profile_text(user_id: int) -> str:
+        """Получить профиль пользователя"""
         user = await db.get_user(user_id)
         if not user:
             return "❌ Пользователь не найден."
 
-        clan = await db.get_clan(user['clan_id']) if user['clan_id'] else None
+        clan_name = "Нет"
+        if user.get('clan_id'):
+            clan = await db.get_clan(user['clan_id'])
+            if clan:
+                clan_name = clan['name']
+
         price = await db.get_current_aura_price()
         karma = await db.get_karma(user_id)
-        achievements_count = await db.conn.execute(
-            "SELECT COUNT(*) FROM user_achievements WHERE user_id = ?", (user_id,)
-        )
-        ach_count = (await achievements_count.fetchone())[0]
 
-        profile = (
-            f"👤 <b>{user['nickname']}</b> (уровень {user['level']})\n"
+        text = (
+            f"👤 <b>Профиль игрока {user['nickname']}</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"📊 Влияние: {user['influence']}\n"
-            f"🤝 Доверие: {user['trust']}\n"
-            f"✨ Аура: {user['aura']:.2f}\n"
-            f"💰 Цена ауры: {price:.2f}\n"
-            f"📝 Сообщений: {user['messages_count']}\n"
-            f"🔄 Сделок: {user['deals_count']}\n"
-            f"🏆 Достижений: {ach_count}\n"
-            f"⭐ Карма: {karma}\n"
+            f"💰 Влияние: {user['influence']}\n"
+            f"⭐ Доверие: {user['trust']}\n"
+            f"💎 Аура: {user['aura']:.2f}\n"
+            f"🏰 Клан: {clan_name}\n"
+            f"📊 Уровень: {user['level']} (XP: {user['experience']})\n"
+            f"💬 Сообщений: {user['messages_count']}\n"
+            f"🤝 Сделок: {user['deals_count']}\n"
+            f"⚔️ Побед в войнах: {user['war_wins']}\n"
+            f"🤝 Альянсов: {user['alliances_count']}\n"
+            f"📨 Приглашений: {user['invites_count']}\n"
+            f"📈 Карма: {karma}\n"
         )
-        if clan:
-            profile += f"🏰 Клан: {clan['name']}\n"
-            profile += f"   📊 Казна: {clan['influence_treasury']} влияния, {clan['aura_treasury']:.2f} ауры"
-        return profile
+        return text
 
     @staticmethod
     async def get_top_text() -> str:
+        """Получить топ игроков"""
         top_inf = await db.get_top_influence(5)
         top_tr = await db.get_top_trust(5)
         top_au = await db.get_top_aura(5)
@@ -1730,6 +1693,7 @@ class GameLogic:
 
     @staticmethod
     def get_help_text() -> str:
+        """Получить справку"""
         return (
             "🎮 <b>Правила игры</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
@@ -1754,8 +1718,7 @@ class GameLogic:
 
             "✨ <b>Аура:</b>\n"
             "• Купить: \"купить аура 10\" — цена РАСТЁТ\n"
-            "• Продать: \"продать аура 5\" — цена ПАДАЕТ\n"
-            "• Изменение цены: +5% за покупку, -3% за продажу\n\n"
+            "• Продать: \"продать аура 5\" — цена ПАДАЕТ\n\n"
 
             "🏰 <b>Кланы:</b>\n"
             "• Создать: \"создать клан Название\" (200 влияния + 10 доверия)\n"
@@ -1791,6 +1754,7 @@ class GameLogic:
 
     @staticmethod
     async def get_clan_profile_text(clan_id: int) -> str:
+        """Получить профиль клана"""
         clan = await db.get_clan(clan_id)
         if not clan:
             return "❌ Клан не найден."
@@ -1843,35 +1807,8 @@ class GameLogic:
         return text
 
     @staticmethod
-    async def get_profile_text(user_id: int) -> str:
-        user = await db.get_user(user_id)
-        if not user:
-            return "❌ Пользователь не найден."
-
-        clan_name = "Нет"
-        if user.get('clan_id'):
-            clan = await db.get_clan(user['clan_id'])
-            if clan:
-                clan_name = clan['name']
-
-        text = (
-            f"👤 <b>Профиль игрока {user['nickname']}</b>\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"💰 Влияние: {user['influence']}\n"
-            f"⭐ Доверие: {user['trust']}\n"
-            f"💎 Аура: {user['aura']:.2f}\n"
-            f"🏰 Клан: {clan_name}\n"
-            f"📊 Уровень: {user['level']} (XP: {user['experience']})\n"
-            f"💬 Сообщений: {user['messages_count']}\n"
-            f"🤝 Сделок: {user['deals_count']}\n"
-            f"⚔️ Побед в войнах: {user['war_wins']}\n"
-            f"🤝 Альянсов: {user['alliances_count']}\n"
-            f"📨 Приглашений: {user['invites_count']}\n"
-        )
-        return text
-
-    @staticmethod
     async def get_clan_power_rating_text(limit: int = 10) -> str:
+        """Получить рейтинг силы кланов"""
         top_clans = await db.get_clans_by_power(limit)
         text = "⚔️ <b>РЕЙТИНГ СИЛЫ КЛАНОВ</b> ⚔️\n━━━━━━━━━━━━━━━\n\n"
         for i, clan in enumerate(top_clans, 1):
@@ -1889,6 +1826,7 @@ class GameLogic:
 
     @staticmethod
     async def get_war_status_text(war_id: int) -> str:
+        """Получить статус войны"""
         async with db.conn.execute(
             """SELECT w.*, 
                       c1.name as clan1_name, 
@@ -1928,6 +1866,7 @@ class GameLogic:
 
     @staticmethod
     async def get_achievements_text(user_id: int) -> str:
+        """Получить достижения"""
         user = await db.get_user(user_id)
         if not user:
             return "❌ Пользователь не найден."
@@ -1958,6 +1897,7 @@ class GameLogic:
 
     @staticmethod
     async def get_level_text(user_id: int) -> str:
+        """Получить уровень"""
         user = await db.get_user(user_id)
         if not user:
             return "❌ Пользователь не найден."
@@ -1977,6 +1917,7 @@ class GameLogic:
 
     @staticmethod
     async def check_expired_deals() -> List[Dict]:
+        """Проверить просроченные сделки"""
         expired = await db.get_expired_deals()
         events = []
         for deal in expired:
@@ -2006,4 +1947,3 @@ class GameLogic:
                 for member in winner_members:
                     await db.update_user(member['id'], war_wins=member['war_wins'] + 1)
                     await db.check_achievements(member['id'])
-                # TODO: оповестить кланы (можно через events)
