@@ -947,11 +947,13 @@ async def on_shutdown():
 
 
 async def main():
-    # 👇 РЕГИСТРИРУЕМ STARTUP И SHUTDOWN (это было пропущено!)
+    # 👇 ЯВНО ПОДКЛЮЧАЕМ БАЗУ
+    await db.connect()
+    logger.info("Database connected")
+    
+    # Регистрируем startup/shutdown
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-
-    # 👇 ЯВНО ПОДКЛЮЧАЕМ MIDDLEWARE (для надёжности)
     dp.message.middleware(ProtectionMiddleware())
 
     # Получаем порт от Render
@@ -981,6 +983,3 @@ async def main():
     config = uvicorn.Config(starlette_app, host="0.0.0.0", port=PORT)
     server = uvicorn.Server(config)
     await server.serve()
-
-if __name__ == "__main__":
-    asyncio.run(main())
