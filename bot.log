@@ -1,0 +1,77 @@
+2026-02-21 14:13:58,294 INFO __main__: Starting polling...
+2026-02-21 14:13:58,295 INFO __main__: Starting up...
+2026-02-21 14:13:58,345 INFO __main__: Bot started successfully!
+2026-02-21 14:17:13,045 INFO __main__: Shutting down...
+2026-02-21 14:17:13,046 INFO __main__: Database closed
+2026-02-21 14:17:18,587 INFO __main__: Starting polling...
+2026-02-21 14:17:18,599 INFO __main__: Starting up...
+2026-02-21 14:17:18,616 INFO __main__: Bot started successfully!
+2026-02-21 14:19:58,892 ERROR __main__: ProtectionMiddleware failed
+Traceback (most recent call last):
+  File "C:\Users\ASUS VivoBook\OneDrive\Desktop\gamee1\bot.py", line 127, in __call__
+    msg.text = html.escape(msg.text)
+    ^^^^^^^^
+  File "C:\Users\ASUS VivoBook\AppData\Local\Programs\Python\Python311\Lib\site-packages\pydantic\main.py", line 830, in __setattr__
+    self._check_frozen(name, value)
+  File "C:\Users\ASUS VivoBook\AppData\Local\Programs\Python\Python311\Lib\site-packages\pydantic\main.py", line 894, in _check_frozen
+    raise pydantic_core.ValidationError.from_exception_data(self.__class__.__name__, [error])
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Message
+text
+  Instance is frozen [type=frozen_instance, input_value='б', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.7/v/frozen_instance
+2026-02-21 14:33:56,547 INFO __main__: Shutting down...
+2026-02-21 14:33:56,549 INFO __main__: Database closed
+2026-02-21 16:16:06,439 INFO __main__: Starting polling...
+2026-02-21 16:16:06,447 INFO __main__: Starting up...
+2026-02-21 16:16:06,549 INFO __main__: Bot started successfully!
+2026-02-21 16:16:06,930 INFO __main__: Ignoring old message from 8360828421 (age=4164.930028)
+2026-02-21 16:16:06,936 INFO __main__: Ignoring old message from 8360828421 (age=4161.93614)
+2026-02-21 16:16:06,936 INFO __main__: Ignoring old message from 8360828421 (age=4128.93614)
+2026-02-21 16:16:06,936 INFO __main__: Ignoring old message from 8516597211 (age=3738.93614)
+2026-02-21 16:16:06,942 INFO __main__: Ignoring old message from 8516597211 (age=2317.942939)
+2026-02-21 16:16:06,946 INFO __main__: Ignoring old message from 8516597211 (age=2316.946038)
+2026-02-21 16:16:06,948 INFO __main__: Ignoring old message from 8516597211 (age=2291.948119)
+2026-02-21 16:16:06,956 INFO __main__: Ignoring old message from 8516597211 (age=2290.95467)
+2026-02-21 16:16:06,956 INFO __main__: Ignoring old message from 8516597211 (age=2290.956679)
+2026-02-21 16:16:06,959 INFO __main__: Ignoring old message from 8516597211 (age=2290.959771)
+2026-02-21 16:16:06,963 INFO __main__: Ignoring old message from 8516597211 (age=102.963791)
+2026-02-21 16:16:06,967 INFO __main__: Ignoring old message from 8516597211 (age=101.96781)
+2026-02-21 16:16:06,973 INFO __main__: Ignoring old message from 8516597211 (age=100.97385)
+2026-02-21 16:16:06,976 INFO __main__: Ignoring old message from 8516597211 (age=100.976126)
+2026-02-21 16:16:06,981 INFO __main__: Ignoring old message from 8516597211 (age=98.981539)
+2026-02-21 16:16:06,984 INFO __main__: Ignoring old message from 8516597211 (age=97.9846)
+2026-02-21 16:16:06,986 INFO __main__: Ignoring old message from 8516597211 (age=97.986609)
+2026-02-21 16:16:06,989 INFO __main__: Ignoring old message from 8516597211 (age=97.989395)
+2026-02-21 16:16:06,993 INFO __main__: Ignoring old message from 8516597211 (age=97.993861)
+2026-02-21 16:16:21,315 ERROR __main__: ProtectionMiddleware failed
+Traceback (most recent call last):
+  File "C:\Users\ASUS VivoBook\OneDrive\Desktop\gamee1\bot.py", line 127, in __call__
+    msg.text = html.escape(msg.text)
+    ^^^^^^^^
+  File "C:\Users\ASUS VivoBook\AppData\Local\Programs\Python\Python311\Lib\site-packages\pydantic\main.py", line 830, in __setattr__
+    self._check_frozen(name, value)
+  File "C:\Users\ASUS VivoBook\AppData\Local\Programs\Python\Python311\Lib\site-packages\pydantic\main.py", line 894, in _check_frozen
+    raise pydantic_core.ValidationError.from_exception_data(self.__class__.__name__, [error])
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Message
+text
+  Instance is frozen [type=frozen_instance, input_value='/start', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.7/v/frozen_instance
+2026-02-21 16:16:25,676 INFO __main__: Repeated command ignored 8516597211
+2026-02-21 16:16:26,260 INFO __main__: Repeated command ignored 8516597211
+2026-02-21 16:16:26,675 ERROR __main__: ProtectionMiddleware failed
+Traceback (most recent call last):
+  File "C:\Users\ASUS VivoBook\OneDrive\Desktop\gamee1\bot.py", line 127, in __call__
+    msg.text = html.escape(msg.text)
+    ^^^^^^^^
+  File "C:\Users\ASUS VivoBook\AppData\Local\Programs\Python\Python311\Lib\site-packages\pydantic\main.py", line 830, in __setattr__
+    self._check_frozen(name, value)
+  File "C:\Users\ASUS VivoBook\AppData\Local\Programs\Python\Python311\Lib\site-packages\pydantic\main.py", line 894, in _check_frozen
+    raise pydantic_core.ValidationError.from_exception_data(self.__class__.__name__, [error])
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Message
+text
+  Instance is frozen [type=frozen_instance, input_value='/start', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.7/v/frozen_instance
+2026-02-21 16:16:26,821 INFO __main__: Repeated command ignored 8516597211
+2026-02-21 16:16:27,051 INFO __main__: Rate limit exceeded: 8516597211
+2026-02-21 16:16:27,275 INFO __main__: Rate limit exceeded: 8516597211
+2026-02-21 16:16:27,720 INFO __main__: Rate limit exceeded: 8516597211
