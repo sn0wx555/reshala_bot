@@ -1801,6 +1801,697 @@ class Database:
         
         if not clans:
             return None
+
+    async def create_duel(self, player1_id: int, player2_id: int, bet_amount: int) -> Dict:
+        """Создать дуэль"""
+        await self._ensure_connection()
+        ends_at = (datetime.now() + timedelta(minutes=5)).isoformat()
+        async with self.conn.execute(
+            "INSERT INTO duels (player1_id, player2_id, bet_amount, status, ends_at) VALUES (?, ?, ?, 'active', ?) RETURNING *",
+            (player1_id, player2_id, bet_amount, ends_at)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def finish_duel(self, duel_id: int) -> Optional[Dict]:
+        """Завершить дуэль"""
+        await self._ensure_connection()
+        async with self.conn.execute("SELECT * FROM duels WHERE id = ?", (duel_id,)) as cursor:
+            duel = dict(await cursor.fetchone())
+        
+        if duel['player1_messages'] > duel['player2_messages']:
+            winner_id = duel['player1_id']
+        elif duel['player2_messages'] > duel['player1_messages']:
+            winner_id = duel['player2_id']
+        else:
+            winner_id = None
+        
+        if winner_id:
+            await self.conn.execute(
+                "UPDATE users SET influence = influence + ? WHERE id = ?", (duel['bet_amount'], winner_id)
+            )
+        
+        await self.conn.execute(
+            "UPDATE duels SET status = 'finished', winner_id = ? WHERE id = ?", (winner_id, duel_id)
+        )
+        await self.conn.commit()
+        
+        return {
+            'winner_id': winner_id,
+            'player1_messages': duel['player1_messages'],
+            'player2_messages': duel['player2_messages']
+        }
+
+    async def get_active_duels(self, user_id: int) -> List[Dict]:
+        """Получить активные дуэли пользователя"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "SELECT * FROM duels WHERE status = 'active' AND (player1_id = ? OR player2_id = ?) AND ends_at > datetime('now')",
+            (user_id, user_id)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def create_investment(self, user_id: int, amount: int, duration_hours: int = 1) -> Optional[Dict]:
+        """Создать инвестицию"""
+        await self._ensure_connection()
+        import random
+        multiplier = random.uniform(0.5, 2.0)
+        ends_at = (datetime.now() + timedelta(hours=duration_hours)).isoformat()
+        
+        user = await self.get_user(user_id)
+        if user['influence'] < amount:
+            return None
+        
+        await self.conn.execute(
+            "UPDATE users SET influence = influence - ? WHERE id = ?", (amount, user_id)
+        )
+        
+        async with self.conn.execute(
+            "INSERT INTO investments (user_id, amount, duration_hours, multiplier, ends_at) VALUES (?, ?, ?, ?, ?) RETURNING *",
+            (user_id, amount, duration_hours, multiplier, ends_at)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def check_investments(self) -> List[Dict]:
+        """Проверить завершённые инвестиции"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "SELECT * FROM investments WHERE status = 'active' AND ends_at <= datetime('now')"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def settle_investment(self, investment_id: int) -> Dict:
+        """Рассчитать прибыль по инвестиции"""
+        await self._ensure_connection()
+        async with self.conn.execute("SELECT * FROM investments WHERE id = ?", (investment_id,)) as cursor:
+            inv = dict(await cursor.fetchone())
+        
+        profit = int(inv['amount'] * inv['multiplier']) - inv['amount']
+        new_amount = int(inv['amount'] * inv['multiplier'])
+        
+        await self.conn.execute(
+            "UPDATE users SET influence = influence + ? WHERE id = ?", (new_amount, inv['user_id'])
+        )
+        await self.conn.execute(
+            "UPDATE investments SET status = 'completed', profit_loss = ? WHERE id = ?", (profit, investment_id)
+        )
+        await self.conn.commit()
+        
+        return {'profit': profit, 'new_amount': new_amount}
+
+    async def buy_lottery_ticket(self, user_id: int, round_number: int) -> bool:
+        """Купить лотерейный билет за 10 влияния"""
+        await self._ensure_connection()
+        user = await self.get_user(user_id)
+        if user['influence'] < 10:
+            return False
+        
+        await self.conn.execute(
+            "UPDATE users SET influence = influence - 10 WHERE id = ?", (user_id,)
+        )
+        await self.conn.execute(
+            "UPDATE lottery_rounds SET jackpot = jackpot + 10 WHERE round_number = ?", (round_number,)
+        )
+        await self.conn.execute(
+            "INSERT INTO lottery_tickets (user_id, round_number) VALUES (?, ?)", (user_id, round_number)
+        )
+        await self.conn.commit()
+        return True
+
+    async def get_lottery_round(self, round_number: int) -> Optional[Dict]:
+        """Получить информацию о раунде лотереи"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "SELECT * FROM lottery_rounds WHERE round_number = ?", (round_number,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def create_lottery_round(self, round_number: int) -> Dict:
+        """Создать новый раунд лотереи"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "INSERT INTO lottery_rounds (round_number) VALUES (?) RETURNING *", (round_number,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def draw_lottery(self, round_number: int) -> Optional[int]:
+        """Розыгрыш лотереи"""
+        await self._ensure_connection()
+        import random
+        
+        async with self.conn.execute(
+            "SELECT user_id FROM lottery_tickets WHERE round_number = ?", (round_number,)
+        ) as cursor:
+            tickets = await cursor.fetchall()
+        
+        if not tickets:
+            return None
+        
+        winner = random.choice(tickets)
+        winner_id = winner['user_id']
+        
+        async with self.conn.execute(
+            "SELECT jackpot FROM lottery_rounds WHERE round_number = ?", (round_number,)
+        ) as cursor:
+            jackpot = (await cursor.fetchone())['jackpot']
+        
+        await self.conn.execute(
+            "UPDATE users SET influence = influence + ? WHERE id = ?", (jackpot, winner_id)
+        )
+        await self.conn.execute(
+            "UPDATE lottery_rounds SET winner_id = ?, status = 'drawn', drawn_at = datetime('now') WHERE round_number = ?",
+            (winner_id, round_number)
+        )
+        await self.conn.commit()
+        
+        return winner_id
+
+    async def create_future(self, user_id: int, amount: float, duration_hours: int = 24) -> Optional[Dict]:
+        """Купить фьючерс на ауру"""
+        await self._ensure_connection()
+        current_price = await self.get_current_aura_price()
+        cost = int(amount * current_price * 0.1)
+        
+        user = await self.get_user(user_id)
+        if user['influence'] < cost:
+            return None
+        
+        await self.conn.execute(
+            "UPDATE users SET influence = influence - ? WHERE id = ?", (cost, user_id)
+        )
+        
+        ends_at = (datetime.now() + timedelta(hours=duration_hours)).isoformat()
+        async with self.conn.execute(
+            "INSERT INTO futures (user_id, amount, strike_price, current_price_at_open, expires_at) VALUES (?, ?, ?, ?, ?) RETURNING *",
+            (user_id, amount, current_price, current_price, ends_at)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def settle_futures(self) -> List[Dict]:
+        """Рассчитать фьючерсы"""
+        await self._ensure_connection()
+        current_price = await self.get_current_aura_price()
+        
+        async with self.conn.execute(
+            "SELECT * FROM futures WHERE status = 'active' AND expires_at <= datetime('now')"
+        ) as cursor:
+            futures = await cursor.fetchall()
+        
+        results = []
+        for f in futures:
+            f = dict(f)
+            if current_price > f['strike_price']:
+                profit = int((current_price - f['strike_price']) * f['amount'])
+                await self.conn.execute(
+                    "UPDATE users SET influence = influence + ? WHERE id = ?", (profit, f['user_id'])
+                )
+                await self.conn.execute(
+                    "UPDATE futures SET profit_loss = ?, status = 'settled' WHERE id = ?", (profit, f['id'])
+                )
+                results.append({'user_id': f['user_id'], 'profit': profit})
+            else:
+                await self.conn.execute(
+                    "UPDATE futures SET profit_loss = 0, status = 'settled' WHERE id = ?", (f['id'],)
+                )
+        
+        await self.conn.commit()
+        return results
+
+    async def buy_insurance(self, user_id: int, coverage: int, premium: int) -> Optional[Dict]:
+        """Купить страховку от потери влияния"""
+        await self._ensure_connection()
+        user = await self.get_user(user_id)
+        if user['influence'] < premium:
+            return None
+        
+        await self.conn.execute(
+            "UPDATE users SET influence = influence - ? WHERE id = ?", (premium, user_id)
+        )
+        
+        expires_at = (datetime.now() + timedelta(days=30)).isoformat()
+        async with self.conn.execute(
+            "INSERT INTO insurance_policies (user_id, coverage_amount, premium, expires_at) VALUES (?, ?, ?, ?) RETURNING *",
+            (user_id, coverage, premium, expires_at)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def get_active_insurance(self, user_id: int) -> Optional[Dict]:
+        """Получить активную страховку пользователя"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "SELECT * FROM insurance_policies WHERE user_id = ? AND active = 1 AND expires_at > datetime('now')",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def create_racket(self, racketeer_id: int, target_id: int, amount: int) -> Dict:
+        """Создать попытку рэкета"""
+        await self._ensure_connection()
+        import random
+        success = random.random() > 0.3
+        
+        async with self.conn.execute(
+            "INSERT INTO rackets (racketeer_id, target_id, amount, success) VALUES (?, ?, ?, ?) RETURNING *",
+            (racketeer_id, target_id, amount, success)
+        ) as cursor:
+            row = await cursor.fetchone()
+            
+        if success:
+            target = await self.get_user(target_id)
+            if target and target['influence'] >= amount:
+                await self.conn.execute(
+                    "UPDATE users SET influence = influence - ? WHERE id = ?", (amount, target_id)
+                )
+                await self.conn.execute(
+                    "UPDATE users SET influence = influence + ? WHERE id = ?", (amount, racketeer_id)
+                )
+        else:
+            penalty = int(amount * 0.2)
+            racketeer = await self.get_user(racketeer_id)
+            if racketeer and racketeer['influence'] >= penalty:
+                await self.conn.execute(
+                    "UPDATE users SET influence = influence - ? WHERE id = ?", (penalty, racketeer_id)
+                )
+        
+        await self.conn.execute(
+            "UPDATE rackets SET status = 'resolved', resolved_at = datetime('now') WHERE id = ?", (row['id'],)
+        )
+        await self.conn.commit()
+        return dict(row)
+
+    async def update_authority(self, user_id: int, points: int):
+        """Обновить очки авторитета"""
+        await self._ensure_connection()
+        await self.conn.execute(
+            """INSERT INTO authority_points (user_id, points) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET points = points + ?, updated_at = datetime('now')""",
+            (user_id, points, points)
+        )
+        
+        async with self.conn.execute("SELECT points FROM authority_points WHERE user_id = ?", (user_id,)) as cursor:
+            total = (await cursor.fetchone())['points']
+        
+        rank = 'none'
+        if total >= 1000:
+            rank = 'legenda'
+        elif total >= 500:
+            rank = 'boss'
+        elif total >= 200:
+            rank = 'capo'
+        elif total >= 50:
+            rank = 'soldier'
+        
+        await self.conn.execute("UPDATE authority_points SET rank = ? WHERE user_id = ?", (rank, user_id))
+        await self.conn.commit()
+
+    async def get_authority(self, user_id: int) -> Dict:
+        """Получить информацию об авторитете"""
+        await self._ensure_connection()
+        async with self.conn.execute("SELECT * FROM authority_points WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else {'user_id': user_id, 'points': 0, 'rank': 'none'}
+
+    async def create_showdown(self, challenger_id: int, challenged_id: int, stake: int = 100) -> Dict:
+        """Создать разборку"""
+        await self._ensure_connection()
+        ends_at = (datetime.now() + timedelta(minutes=3)).isoformat()
+        async with self.conn.execute(
+            "INSERT INTO showdowns (challenger_id, challenged_id, stake_amount, ends_at) VALUES (?, ?, ?, ?) RETURNING *",
+            (challenger_id, challenged_id, stake, ends_at)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def finish_showdown(self, showdown_id: int) -> Optional[Dict]:
+        """Завершить разборку"""
+        await self._ensure_connection()
+        async with self.conn.execute("SELECT * FROM showdowns WHERE id = ?", (showdown_id,)) as cursor:
+            sd = dict(await cursor.fetchone())
+        
+        if sd['challenger_score'] > sd['challenged_score']:
+            winner_id = sd['challenger_id']
+        elif sd['challenged_score'] > sd['challenger_score']:
+            winner_id = sd['challenged_id']
+        else:
+            winner_id = None
+        
+        if winner_id:
+            await self.conn.execute(
+                "UPDATE users SET influence = influence + ? WHERE id = ?", (sd['stake_amount'], winner_id)
+            )
+            await self.update_authority(winner_id, 10)
+        
+        await self.conn.execute(
+            "UPDATE showdowns SET status = 'finished', winner_id = ? WHERE id = ?", (winner_id, showdown_id)
+        )
+        await self.conn.commit()
+        
+        return {'winner_id': winner_id}
+
+    async def create_protection(self, protected_clan_id: int, protector_clan_id: int, cost_per_day: int = 50) -> Dict:
+        """Создать крышу (защиту) клана"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "INSERT INTO clan_protections (protected_clan_id, protector_clan_id, cost_per_day) VALUES (?, ?, ?) RETURNING *",
+            (protected_clan_id, protector_clan_id, cost_per_day)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def propose_clan_wedding(self, clan1_id: int, clan2_id: int, proposer_id: int, cost: int = 1000) -> Dict:
+        """Предложить свадьбу кланов"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "INSERT INTO clan_weddings (clan1_id, clan2_id, cost_influence, proposer_id) VALUES (?, ?, ?, ?) RETURNING *",
+            (clan1_id, clan2_id, cost, proposer_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def spawn_clan_boss(self, boss_name: str, total_health: int = 10000) -> Dict:
+        """Создать кланового босса"""
+        await self._ensure_connection()
+        ends_at = (datetime.now() + timedelta(days=1)).isoformat()
+        async with self.conn.execute(
+            "INSERT INTO clan_bosses (boss_name, total_health, current_health, ends_at) VALUES (?, ?, ?, ?) RETURNING *",
+            (boss_name, total_health, total_health, ends_at)
+        ) as cursor:
+            row = await cursor.fetchone()
+            await self.conn.commit()
+            return dict(row)
+
+    async def hit_clan_boss(self, boss_id: int, user_id: int, damage: int) -> bool:
+        """Атаковать кланового босса"""
+        await self._ensure_connection()
+        async with self.conn.execute("SELECT * FROM clan_bosses WHERE id = ?", (boss_id,)) as cursor:
+            boss = dict(await cursor.fetchone())
+        
+        if not boss or boss['status'] != 'active':
+            return False
+        
+        new_health = boss['current_health'] - damage
+        
+        await self.conn.execute(
+            """INSERT INTO clan_boss_damage (boss_id, user_id, damage) VALUES (?, ?, ?)
+               ON CONFLICT(boss_id, user_id) DO UPDATE SET damage = damage + ?""",
+            (boss_id, user_id, damage, damage)
+        )
+        
+        if new_health <= 0:
+            await self.conn.execute(
+                "UPDATE clan_bosses SET current_health = 0, status = 'defeated' WHERE id = ?", (boss_id,)
+            )
+            async with self.conn.execute(
+                "SELECT user_id, damage FROM clan_boss_damage WHERE boss_id = ? ORDER BY damage DESC LIMIT 10", (boss_id,)
+            ) as cursor:
+                contributors = await cursor.fetchall()
+            
+            for i, c in enumerate(contributors):
+                reward = int(boss['reward_influence'] / (i + 1))
+                await self.add_influence(c['user_id'], reward)
+        else:
+            await self.conn.execute(
+                "UPDATE clan_bosses SET current_health = ? WHERE id = ?", (new_health, boss_id)
+            )
+        
+        await self.conn.commit()
+        return True
+
+    async def clan_exchange(self, user_id: int, clan_id: int, from_type: str, amount: float) -> Optional[Dict]:
+        """Обмен внутри клана без комиссии"""
+        await self._ensure_connection()
+        user = await self.get_user(user_id)
+        if not user or user['clan_id'] != clan_id:
+            return None
+        
+        async with self.conn.execute(
+            "SELECT * FROM clan_exchange_rates WHERE clan_id = ?", (clan_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                rate = dict(row)
+            else:
+                await self.conn.execute(
+                    "INSERT INTO clan_exchange_rates (clan_id) VALUES (?)", (clan_id,)
+                )
+                await self.conn.commit()
+                rate = {'influence_to_aura_rate': 0.1, 'aura_to_influence_rate': 10}
+        
+        if from_type == 'influence':
+            if user['influence'] < amount:
+                return None
+            aura_amount = amount * rate['influence_to_aura_rate']
+            await self.conn.execute(
+                "UPDATE users SET influence = influence - ?, aura = aura + ? WHERE id = ?",
+                (amount, aura_amount, user_id)
+            )
+            await self.conn.commit()
+            return {'from_type': 'influence', 'to_type': 'aura', 'from_amount': amount, 'to_amount': aura_amount}
+        else:
+            if user['aura'] < amount:
+                return None
+            influence_amount = amount * rate['aura_to_influence_rate']
+            await self.conn.execute(
+                "UPDATE users SET aura = aura - ?, influence = influence + ? WHERE id = ?",
+                (amount, influence_amount, user_id)
+            )
+            await self.conn.commit()
+            return {'from_type': 'aura', 'to_type': 'influence', 'from_amount': amount, 'to_amount': influence_amount}
+
+    async def donor_transfer(self, from_user_id: int, to_user_id: int, amount: int) -> bool:
+        """Передать влияние без сделки (раз в день)"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "SELECT 1 FROM donor_transfers WHERE from_user_id = ? AND transferred_at > datetime('now', '-1 day')",
+            (from_user_id,)
+        ) as cursor:
+            if await cursor.fetchone():
+                return False
+        
+        user = await self.get_user(from_user_id)
+        if user['influence'] < amount:
+            return False
+        
+        await self.conn.execute(
+            "UPDATE users SET influence = influence - ? WHERE id = ?", (amount, from_user_id)
+        )
+        await self.conn.execute(
+            "UPDATE users SET influence = influence + ? WHERE id = ?", (amount, to_user_id)
+        )
+        await self.conn.execute(
+            "INSERT INTO donor_transfers (from_user_id, to_user_id, amount) VALUES (?, ?, ?)",
+            (from_user_id, to_user_id, amount)
+        )
+        await self.conn.commit()
+        return True
+
+    async def set_birthday(self, user_id: int, birthday: str):
+        """Установить день рождения"""
+        await self._ensure_connection()
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO player_birthdays (user_id, birthday) VALUES (?, ?)",
+            (user_id, birthday)
+        )
+        await self.conn.commit()
+
+    async def get_birthday_users(self) -> List[Dict]:
+        """Получить ��гроков с днём рождения сегодня"""
+        await self._ensure_connection()
+        today = datetime.now().strftime('%m-%d')
+        async with self.conn.execute(
+            "SELECT pb.*, u.nickname FROM player_birthdays pb JOIN users u ON pb.user_id = u.id WHERE strftime('%m-%d', pb.birthday) = ?",
+            (today,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def birthday_wish(self, birthday_user_id: int, wisher_id: int, wish_text: str = "Поздравляю!"):
+        """Пожелать с днём рождения"""
+        await self._ensure_connection()
+        await self.conn.execute(
+            "INSERT INTO birthday_wishes (birthday_user_id, wisher_id, wish_text) VALUES (?, ?, ?)",
+            (birthday_user_id, wisher_id, wish_text)
+        )
+        await self.conn.execute("UPDATE users SET trust = trust + 1 WHERE id = ?", (birthday_user_id,))
+        await self.conn.commit()
+
+    async def start_espionage(self, from_clan: int, to_clan: int, cost: int) -> bool:
+        """Начать шпионаж"""
+        await self._ensure_connection()
+        clan = await self.get_clan(from_clan)
+        if clan['influence_treasury'] < cost:
+            return False
+        await self.conn.execute(
+            "UPDATE clans SET influence_treasury = influence_treasury - ? WHERE id = ?",
+            (cost, from_clan)
+        )
+        ends_at = (datetime.now() + timedelta(hours=24)).isoformat()
+        await self.conn.execute(
+            "INSERT INTO espionage (from_clan_id, to_clan_id, ends_at) VALUES (?, ?, ?)",
+            (from_clan, to_clan, ends_at)
+        )
+        await self.conn.commit()
+        return True
+
+    async def create_deposit(self, user_id: int, amount: int, days: int) -> bool:
+        """Создать вклад"""
+        await self._ensure_connection()
+        if amount <= 0:
+            return False
+        user = await self.get_user(user_id)
+        if user['influence'] < amount:
+            return False
+        matured_at = (datetime.now() + timedelta(days=days)).isoformat()
+        await self.conn.execute(
+            "UPDATE users SET influence = influence - ? WHERE id = ?",
+            (amount, user_id)
+        )
+        await self.conn.execute(
+            "INSERT INTO deposits (user_id, amount_influence, interest_rate, matured_at) VALUES (?, ?, ?, ?)",
+            (user_id, amount, DEPOSIT_INTEREST, matured_at)
+        )
+        await self.conn.commit()
+        return True
+
+    async def withdraw_deposit(self, deposit_id: int) -> Optional[int]:
+        """Закрыть вклад и получить средства"""
+        await self._ensure_connection()
+        async with self.conn.execute("SELECT * FROM deposits WHERE id = ? AND status = 'active'", (deposit_id,)) as cursor:
+            dep = await cursor.fetchone()
+        if not dep:
+            return None
+        dep = dict(dep)
+        now = datetime.now()
+        mature = datetime.fromisoformat(dep['matured_at'])
+        if now < mature:
+            amount = dep['amount_influence']
+        else:
+            amount = int(dep['amount_influence'] * (1 + dep['interest_rate']))
+        await self.conn.execute(
+            "UPDATE deposits SET status = 'withdrawn' WHERE id = ?",
+            (deposit_id,)
+        )
+        await self.conn.execute(
+            "UPDATE users SET influence = influence + ? WHERE id = ?",
+            (amount, dep['user_id'])
+        )
+        await self.conn.commit()
+        return amount
+
+    async def create_loan(self, user_id: int, amount: int, collateral_aura: float, days: int) -> bool:
+        """Взять кредит"""
+        await self._ensure_connection()
+        user = await self.get_user(user_id)
+        if user['aura'] < collateral_aura:
+            return False
+        due_at = (datetime.now() + timedelta(days=days)).isoformat()
+        await self.conn.execute(
+            "UPDATE users SET aura = aura - ? WHERE id = ?",
+            (collateral_aura, user_id)
+        )
+        await self.conn.execute(
+            "INSERT INTO loans (user_id, amount_influence, collateral_aura, due_at) VALUES (?, ?, ?, ?)",
+            (user_id, amount, collateral_aura, due_at)
+        )
+        await self.add_influence(user_id, amount)
+        await self.conn.commit()
+        return True
+
+    async def repay_loan(self, loan_id: int) -> bool:
+        """Погасить кредит"""
+        await self._ensure_connection()
+        async with self.conn.execute("SELECT * FROM loans WHERE id = ? AND status = 'active'", (loan_id,)) as cursor:
+            loan = await cursor.fetchone()
+        if not loan:
+            return False
+        loan = dict(loan)
+        user = await self.get_user(loan['user_id'])
+        total = int(loan['amount_influence'] * (1 + LOAN_INTEREST))
+        if user['influence'] < total:
+            return False
+        await self.conn.execute(
+            "UPDATE users SET influence = influence - ? WHERE id = ?",
+            (total, loan['user_id'])
+        )
+        await self.conn.execute(
+            "UPDATE users SET aura = aura + ? WHERE id = ?",
+            (loan['collateral_aura'], loan['user_id'])
+        )
+        await self.conn.execute(
+            "UPDATE loans SET status = 'repaid' WHERE id = ?",
+            (loan_id,)
+        )
+        await self.conn.commit()
+        return True
+
+    async def join_tournament(self, user_id: int, tournament_id: int):
+        """Присоединиться к турниру"""
+        await self._ensure_connection()
+        await self.conn.execute(
+            "INSERT OR IGNORE INTO tournament_participants (tournament_id, user_id) VALUES (?, ?)",
+            (tournament_id, user_id)
+        )
+        await self.conn.commit()
+
+    async def update_tournament_score(self, user_id: int, points: int):
+        """Обновить счёт в турнире"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "SELECT id FROM tournaments WHERE status = 'active' AND start_time <= datetime('now') AND end_time >= datetime('now')"
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row:
+            await self.conn.execute(
+                "UPDATE tournament_participants SET score = score + ? WHERE tournament_id = ? AND user_id = ?",
+                (points, row[0], user_id)
+            )
+            await self.conn.commit()
+
+    async def finish_tournament(self, tournament_id: int):
+        """Завершить турнир и распределить призы"""
+        await self._ensure_connection()
+        async with self.conn.execute(
+            "SELECT user_id, score FROM tournament_participants WHERE tournament_id = ? ORDER BY score DESC LIMIT 3",
+            (tournament_id,)
+        ) as cursor:
+            winners = await cursor.fetchall()
+        if not winners:
+            return
+        async with self.conn.execute("SELECT prize_pool_influence, prize_pool_aura FROM tournaments WHERE id = ?", (tournament_id,)) as cursor:
+            tour_row = await cursor.fetchone()
+        prize_inf = tour_row['prize_pool_influence']
+        prize_aura = tour_row['prize_pool_aura']
+        shares = [0.5, 0.3, 0.2]
+        for i, row in enumerate(winners):
+            user_id = row['user_id']
+            share = shares[i] if i < len(shares) else 0
+            inf_prize = int(prize_inf * share)
+            aura_prize = prize_aura * share
+            await self.conn.execute(
+                "UPDATE tournament_participants SET rank = ?, prize_influence = ?, prize_aura = ? WHERE tournament_id = ? AND user_id = ?",
+                (i+1, inf_prize, aura_prize, tournament_id, user_id)
+            )
+            await self.add_influence(user_id, inf_prize)
+            if aura_prize > 0:
+                await self.conn.execute("UPDATE users SET aura = aura + ? WHERE id = ?", (aura_prize, user_id))
+        await self.conn.execute("UPDATE tournaments SET status = 'finished' WHERE id = ?", (tournament_id,))
+        await self.conn.commit()
         
         import random
         target_clan = random.choice(clans)
@@ -1815,3 +2506,4 @@ class Database:
         return {'clan_name': target_clan['name'], 'loss': loss}
 
 db = Database()
+
