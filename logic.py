@@ -18,14 +18,6 @@ class GameLogic:
         mentioned_users: Optional[List[int]] = None,
         message_id: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """
-        Обрабатывает сообщение:
-        - начисляет влияние
-        - проверяет инвайты
-        - ежедневный бонус
-        - проверяет специальные триггеры
-        - проверяет защиту от спама
-        """
         result = {
             'influence_gained': 0,
             'events': [],
@@ -44,29 +36,32 @@ class GameLogic:
 
         user = await db.get_or_create_user(user_id, username, nickname)
 
-        # Проверка на спам
+        # ===== ИСПРАВЛЕННЫЙ БЛОК ПРОВЕРКИ СПАМА =====
         is_spam, last_time = await db.check_spam(user_id, SPAM_COOLDOWN)
         if is_spam:
-            penalty = SPAM_PENALTY
-            current_influence = user.get('influence', 0)
-            if current_influence >= penalty:
-                await db.add_influence(user_id, -penalty)
-                result['spam_penalty'] = True
-                result['events'].append({
-                    'type': 'spam_penalty',
-                    'penalty': penalty,
-                    'time_diff': SPAM_COOLDOWN
-                })
+            word_count = len(message_text.split())
+            if word_count > 4:
+                penalty = SPAM_PENALTY
+                current_influence = user.get('influence', 0)
+                if current_influence >= penalty:
+                    await db.add_influence(user_id, -penalty)
+                    result['spam_penalty'] = True
+                    result['events'].append({
+                        'type': 'spam_penalty',
+                        'penalty': penalty,
+                        'word_count': word_count,
+                        'message': '⚠️ Слишком много слов за раз!'
+                    })
             await db.update_spam_record(user_id)
             return result
         
         await db.update_spam_record(user_id)
+        # =============================================
 
-        # Проверяем активное глобальное событие (для модификаторов)
         active_event = await db.get_active_event()
         event_multiplier = active_event['multiplier'] if active_event else 1.0
 
-        # Проверяем успешность инвайта (новичок выполнил условия)
+        # Проверяем успешность инвайта
         if user.get('invited_by'):
             inviter_id = await db.check_invite_success(user_id)
             if inviter_id:
@@ -79,10 +74,9 @@ class GameLogic:
                     'newbie_id': user_id,
                 })
 
-        # --- Начисление влияния за активность ---
-        gain = INFLUENCE_PER_MESSAGE  # базовое сообщение
+        # Начисление влияния за активность
+        gain = INFLUENCE_PER_MESSAGE
 
-        # Ответ на сообщение
         if reply_to_user_id and reply_to_user_id != user_id:
             recipient = await db.get_user(reply_to_user_id)
             if recipient and recipient['influence'] > 0:
@@ -90,7 +84,6 @@ class GameLogic:
                     gain += INFLUENCE_PER_REPLY
                     await db.set_cooldown(user_id, reply_to_user_id, 'reply')
 
-        # Упоминания
         if mentioned_users:
             for mid in mentioned_users:
                 if mid != user_id:
@@ -98,14 +91,13 @@ class GameLogic:
                         gain += INFLUENCE_PER_MENTION
                         await db.set_cooldown(user_id, mid, 'mention')
 
-        # Применяем множитель события
         gain = int(gain * event_multiplier)
 
         if gain > 0:
             await db.add_influence(user_id, gain)
             result['influence_gained'] = gain
 
-        # --- Ежедневный бонус (первое сообщение за 24 часа) ---
+        # Ежедневный бонус
         last_activity = user.get('last_activity')
         now = datetime.now()
         give_bonus = False
@@ -129,42 +121,34 @@ class GameLogic:
                 'amount': bonus
             })
 
-        # Обновляем время последней активности
         await db.update_user(
             user_id,
             last_activity=now.isoformat(),
             messages_count=user['messages_count'] + 1
         )
 
-        # Добавляем опыт за сообщение
         exp_gain = max(1, gain // 2)
         await db.add_experience(user_id, exp_gain)
 
-        # Логируем сообщение
         await db.log_message(user_id, chat_id, reply_to_user_id, mentioned_users)
 
         # --- Обработка специальных текстовых триггеров (без /) ---
         text_lower = message_text.lower().strip()
 
-        # Профиль
         if text_lower in ('профиль', 'profile', 'мой профиль'):
             result['profile_request'] = True
 
-        # Топ
         if text_lower in ('топ', 'top', 'рейтинг'):
             result['top_request'] = True
 
-        # Помощь
         if text_lower in ('помощь', 'help', 'правила', 'как играть'):
             result['help_request'] = True
 
-        # Доверие
         if text_lower == 'доверяю' and reply_to_user_id:
             trust_event = await GameLogic._handle_trust(reply_to_user_id, user_id)
             if trust_event:
                 result['events'].append(trust_event)
 
-        # Сделка: @username количество влияние/аура
         deal_match = re.search(r'@(\w+)\s+(\d+(?:\.\d+)?)\s+(влияние|ауру|ауры|influence|aura)', text_lower)
         if deal_match and message_id:
             deal_event = await GameLogic._handle_deal_proposal(
@@ -173,7 +157,6 @@ class GameLogic:
             if deal_event:
                 result['events'].append(deal_event)
 
-        # Создание клана
         clan_match = re.search(r'создать клан [""](.+?)[""]|создать клан (.+)', text_lower)
         if clan_match:
             clan_name = clan_match.group(1) or clan_match.group(2)
@@ -181,7 +164,6 @@ class GameLogic:
             if clan_event:
                 result['events'].append(clan_event)
 
-        # Покупка/продажа ауры
         buy_match = re.search(r'купить аура\s+(\d+(?:\.\d+)?)', text_lower)
         if buy_match:
             amount = float(buy_match.group(1))
@@ -196,7 +178,6 @@ class GameLogic:
             if aura_event:
                 result['events'].append(aura_event)
 
-        # Альянсы
         alliance_match = re.search(r'(?:создать )?альянс(?:\s+с)?\s+(.+)', text_lower)
         if alliance_match:
             target_clan = alliance_match.group(1).strip()
@@ -204,7 +185,6 @@ class GameLogic:
             if alliance_event:
                 result['events'].append(alliance_event)
 
-        # Профиль клана
         clan_profile_match = re.search(r'(?:профиль клана|клан)\s+(.+)', text_lower)
         if clan_profile_match:
             clan_name = clan_profile_match.group(1).strip()
@@ -214,11 +194,9 @@ class GameLogic:
             else:
                 result['events'].append({'type': 'clan_error', 'error': 'not_found', 'name': clan_name})
 
-        # Рейтинг силы кланов
         if text_lower in ('рейтинг кланов', 'сила кланов', 'топ кланов по силе'):
             result['clan_power_request'] = True
 
-        # Объявление войны
         war_declare_match = re.search(r'(?:объявить войну|война)\s+(.+)', text_lower)
         if war_declare_match:
             target_clan = war_declare_match.group(1).strip()
@@ -226,7 +204,6 @@ class GameLogic:
             if war_event:
                 result['events'].append(war_event)
 
-        # Атака в войне
         war_attack_match = re.search(r'(?:атаковать|атака)\s+@?(\w+)', text_lower)
         if war_attack_match:
             target = war_attack_match.group(1).strip()
@@ -234,7 +211,6 @@ class GameLogic:
             if attack_event:
                 result['events'].append(attack_event)
 
-        # Статус войны
         war_status_match = re.search(r'(?:статус войны|война статус)\s+(.+)', text_lower)
         if war_status_match:
             clan_name = war_status_match.group(1).strip()
@@ -246,44 +222,36 @@ class GameLogic:
                 else:
                     result['events'].append({'type': 'war_error', 'error': 'no_active_wars', 'name': clan_name})
 
-        # Достижения
         if text_lower in ('достижения', 'achievements', 'мои достижения'):
             result['achievements_request'] = True
 
-        # Карма
         karma_match = re.search(r'(?:поставить|дать)\s+([+-]?\d+)\s+@?(\w+)', text_lower)
         if karma_match:
             value = int(karma_match.group(1))
             target_nick = karma_match.group(2)
-            # Защита - карма может быть только +1 или -1
             if value in (-1, 1):
                 karma_event = await GameLogic._handle_karma(user_id, nickname, target_nick, value)
                 if karma_event:
                     result['events'].append(karma_event)
 
-        # Банк: вклад
         deposit_match = re.search(r'вклад\s+(\d+)(?:\s+на\s+(\d+)\s+дн)?', text_lower)
         if deposit_match:
             amount = int(deposit_match.group(1))
             days = int(deposit_match.group(2)) if deposit_match.group(2) else 1
-            # Защита от отрицательных сумм
             if amount > 0 and days > 0:
                 deposit_event = await GameLogic._handle_deposit(user_id, nickname, amount, days)
                 if deposit_event:
                     result['events'].append(deposit_event)
 
-        # Кредит
         loan_match = re.search(r'кредит\s+(\d+)(?:\s+под залог\s+([\d.]+)\s+ауры)?', text_lower)
         if loan_match:
             amount = int(loan_match.group(1))
             collateral = float(loan_match.group(2)) if loan_match.group(2) else 0
-            # Защита от отрицательных сумм
             if amount > 0:
                 loan_event = await GameLogic._handle_loan(user_id, nickname, amount, collateral)
                 if loan_event:
                     result['events'].append(loan_event)
 
-        # Шпионаж
         spy_match = re.search(r'шпионаж\s+(.+)', text_lower)
         if spy_match:
             target_clan = spy_match.group(1).strip()
@@ -291,25 +259,20 @@ class GameLogic:
             if spy_event:
                 result['events'].append(spy_event)
 
-        # Турнир
         if text_lower == 'турнир' or text_lower == 'участвовать в турнире':
             tournament_event = await GameLogic._handle_tournament_join(user_id, nickname)
             if tournament_event:
                 result['events'].append(tournament_event)
 
-        # Уровень
         if text_lower in ('уровень', 'level', 'мой уровень'):
             result['level_request'] = True
 
-        # События (проверить активное)
         if text_lower in ('события', 'ивент', 'событие'):
             result['events_request'] = True
 
-        # Черный рынок
         if text_lower == 'черный рынок' or text_lower == 'рынок':
             result['black_market_request'] = True
 
-        # Приглашение нового игрока
         invite_match = re.search(r'пригласить\s+@?(\w+)', text_lower)
         if invite_match:
             target_nick = invite_match.group(1).strip()
@@ -319,76 +282,62 @@ class GameLogic:
 
         # ==================== НОВЫЕ ФУНКЦИИ ====================
         
-        # Рулетка
         roulette_match = re.search(r'рулетка\s+(чёт|нечёт)\s+(\d+)', text_lower)
         if roulette_match:
             bet_type = roulette_match.group(1)
             bet_amount = int(roulette_match.group(2))
-            # Защита от отрицательных и нулевых ставок
             if bet_amount > 0:
                 roulette_event = await GameLogic._handle_roulette(user_id, nickname, bet_type, bet_amount)
                 if roulette_event:
                     result['events'].append(roulette_event)
 
-        # Дуэль
         duel_match = re.search(r'дуэль\s+@?(\w+)\s+(\d+)', text_lower)
         if duel_match:
             target_nick = duel_match.group(1)
             bet_amount = int(duel_match.group(2))
-            # Защита от отрицательных и нулевых ставок
             if bet_amount > 0:
                 duel_event = await GameLogic._handle_duel(user_id, nickname, target_nick, bet_amount)
                 if duel_event:
                     result['events'].append(duel_event)
 
-        # Инвестиции
         invest_match = re.search(r'инвестировать\s+(\d+)', text_lower)
         if invest_match:
             amount = int(invest_match.group(1))
-            # Защита от отрицательных сумм
             if amount > 0:
                 invest_event = await GameLogic._handle_investment(user_id, nickname, amount)
                 if invest_event:
                     result['events'].append(invest_event)
 
-        # Лотерея
         if text_lower == 'лотерея' or text_lower == 'купить билет':
             lottery_event = await GameLogic._handle_lottery(user_id, nickname)
             if lottery_event:
                 result['events'].append(lottery_event)
 
-        # Фьючерсы
         future_match = re.search(r'фьючерс\s+([\d.]+)\s*ауры?', text_lower)
         if future_match:
             amount = float(future_match.group(1))
-            # Защита от отрицательных сумм
             if amount > 0:
                 future_event = await GameLogic._handle_future(user_id, nickname, amount)
                 if future_event:
                     result['events'].append(future_event)
 
-        # Страховка
         insurance_match = re.search(r'страховка\s+(\d+)', text_lower)
         if insurance_match:
             coverage = int(insurance_match.group(1))
-            # Защита от отрицательных сумм
             if coverage > 0:
                 insurance_event = await GameLogic._handle_insurance(user_id, nickname, coverage)
                 if insurance_event:
                     result['events'].append(insurance_event)
 
-        # Рэкет
         racket_match = re.search(r'рэкет\s+@?(\w+)\s+(\d+)', text_lower)
         if racket_match:
             target_nick = racket_match.group(1)
             amount = int(racket_match.group(2))
-            # Защита от отрицательных сумм
             if amount > 0:
                 racket_event = await GameLogic._handle_racket(user_id, nickname, target_nick, amount)
                 if racket_event:
                     result['events'].append(racket_event)
 
-        # Крышевание
         protect_match = re.search(r'крыша\s+(.+)', text_lower)
         if protect_match:
             target_clan = protect_match.group(1).strip()
@@ -396,7 +345,6 @@ class GameLogic:
             if protect_event:
                 result['events'].append(protect_event)
 
-        # Разборки (showdown)
         showdown_match = re.search(r'разборка\s+@?(\w+)', text_lower)
         if showdown_match:
             target_nick = showdown_match.group(1)
@@ -404,7 +352,6 @@ class GameLogic:
             if showdown_event:
                 result['events'].append(showdown_event)
 
-        # Свадьба кланов
         wedding_match = re.search(r'свадьба\s+(.+)', text_lower)
         if wedding_match:
             target_clan = wedding_match.group(1).strip()
@@ -412,35 +359,30 @@ class GameLogic:
             if wedding_event:
                 result['events'].append(wedding_event)
 
-        # Атака клан-босса
         if text_lower in ('босс', 'атаковать босс', 'ударить босс'):
             boss_event = await GameLogic._handle_clan_boss_attack(user_id, nickname)
             if boss_event:
                 result['events'].append(boss_event)
 
-        # Обмен внутри клана
-        exchange_match = re.search(r'обмен\s+(influence|аур��)\s+([\d.]+)', text_lower)
+        # ===== ИСПРАВЛЕННАЯ РЕГУЛЯРКА ДЛЯ ОБМЕНА =====
+        exchange_match = re.search(r'обмен\s+(influence|aura|аура)\s+([\d.]+)', text_lower)
         if exchange_match:
             from_type = exchange_match.group(1)
             amount = float(exchange_match.group(2))
-            # Защита от отрицательных сумм
             if amount > 0:
                 exchange_event = await GameLogic._handle_clan_exchange(user_id, nickname, from_type, amount)
                 if exchange_event:
                     result['events'].append(exchange_event)
 
-        # День донора - передача влияния
         donor_match = re.search(r'подарить\s+@?(\w+)\s+(\d+)\s+влияния', text_lower)
         if donor_match:
             target_nick = donor_match.group(1)
             amount = int(donor_match.group(2))
-            # Защита от отрицательных сумм
             if amount > 0:
                 donor_event = await GameLogic._handle_donor_transfer(user_id, nickname, target_nick, amount)
                 if donor_event:
                     result['events'].append(donor_event)
 
-        # Установить день рождения
         birthday_match = re.search(r'день рождения\s+(\d{2})-(\d{2})', text_lower)
         if birthday_match:
             month = birthday_match.group(1)
@@ -449,7 +391,6 @@ class GameLogic:
             if birthday_event:
                 result['events'].append(birthday_event)
 
-        # Поздравить с днём рождения
         congrats_match = re.search(r'поздравляю\s+@?(\w+)', text_lower)
         if congrats_match:
             target_nick = congrats_match.group(1)
@@ -457,25 +398,21 @@ class GameLogic:
             if congrats_event:
                 result['events'].append(congrats_event)
 
-        # Сезоны
         if text_lower in ('сезон', 'текущий сезон'):
             season_event = await GameLogic._handle_season_info()
             if season_event:
                 result['events'].append(season_event)
 
-        # Личные цели
         if text_lower in ('цели', 'мои цели', 'battle pass'):
             goals_event = await GameLogic._handle_goals_info(user_id)
             if goals_event:
                 result['events'].append(goals_event)
 
-        # Титулы
         if text_lower in ('титулы', 'мои титулы'):
             titles_event = await GameLogic._handle_titles_info(user_id)
             if titles_event:
                 result['events'].append(titles_event)
 
-        # Выбрать титул
         title_select_match = re.search(r'выбрать титул\s+"(.+)"', text_lower)
         if title_select_match:
             title_name = title_select_match.group(1)
@@ -483,35 +420,31 @@ class GameLogic:
             if title_event:
                 result['events'].append(title_event)
 
-        # Авторитет
         if text_lower in ('авторитет', 'мой авторитет'):
             auth_event = await GameLogic._handle_authority_info(user_id)
             if auth_event:
                 result['events'].append(auth_event)
 
-        # Клан-ивенты
-        if text_lower in ('клановый ивент', ' clan event'):
+        if text_lower in ('клановый ивент', 'clan event'):
             clan_event = await GameLogic._handle_clan_event_info()
             if clan_event:
                 result['events'].append(clan_event)
 
-        # Секретные команды
         secret_trigger = text_lower.strip()
         if secret_trigger in ('баланс', 'кинуть', 'наехать', 'шмот', 'кукл'):
             secret_event = await GameLogic._handle_secret_command(user_id, secret_trigger)
             if secret_event:
                 result['events'].append(secret_event)
 
-        # Проверка случайного бонуса
         random_bonus = await db.give_random_bonus(user_id)
         if random_bonus:
             result['events'].append({'type': 'random_bonus', 'amount': random_bonus})
 
         return result
 
+    # ========== Все остальные статические методы (без изменений) ==========
     @staticmethod
     async def _handle_trust(trusted_id: int, truster_id: int) -> Optional[Dict[str, Any]]:
-        """Обработка доверия"""
         if trusted_id == truster_id:
             return None
         if not await db.check_cooldown(truster_id, trusted_id, 'trust', TRUST_COOLDOWN):
@@ -532,7 +465,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_deal_proposal(sender_id: int, sender_nick: str, match, chat_id: int, message_id: int) -> Optional[Dict]:
-        """Обработка предложения сделки"""
         target_username = match.group(1)
         amount = float(match.group(2))
         type_word = match.group(3)
@@ -542,14 +474,12 @@ class GameLogic:
         if sender['trust'] < MIN_TRUST_FOR_DEAL:
             return {'type': 'deal_error', 'error': 'low_trust', 'required': MIN_TRUST_FOR_DEAL}
 
-        # Найдём получателя по username
         async with db.conn.execute("SELECT * FROM users WHERE username = ?", (target_username,)) as cursor:
             row = await cursor.fetchone()
             if not row:
                 return {'type': 'deal_error', 'error': 'user_not_found', 'username': target_username}
             recipient = dict(row)
 
-        # Проверим достаточно ли ресурсов
         if amount_type == 'influence' and sender['influence'] < amount:
             return {'type': 'deal_error', 'error': 'not_enough_influence'}
         if amount_type == 'aura' and sender['aura'] < amount:
@@ -569,7 +499,6 @@ class GameLogic:
 
     @staticmethod
     async def confirm_deal(deal_id: int, confirmer_id: int) -> Optional[Dict]:
-        """Подтверждение сделки (вызывается из bot.py)"""
         deal = await db.get_deal(deal_id)
         if not deal or deal['status'] != 'pending' or deal['recipient_id'] != confirmer_id:
             return None
@@ -587,7 +516,6 @@ class GameLogic:
                 await db.conn.execute("UPDATE users SET trust = trust - 1 WHERE id = ?", (deal['sender_id'],))
                 await db.conn.commit()
                 return {'type': 'deal_violation', 'violator_nick': sender['nickname']}
-            # Перевод
             await db.conn.execute("UPDATE users SET influence = influence - ? WHERE id = ?", (deal['amount'], deal['sender_id']))
             await db.conn.execute("UPDATE users SET influence = influence + ? WHERE id = ?", (deal['amount'], deal['recipient_id']))
         else:  # aura
@@ -599,14 +527,12 @@ class GameLogic:
             await db.conn.execute("UPDATE users SET aura = aura - ? WHERE id = ?", (deal['amount'], deal['sender_id']))
             await db.conn.execute("UPDATE users SET aura = aura + ? WHERE id = ?", (deal['amount'], deal['recipient_id']))
 
-        # Увеличиваем счётчик сделок у обоих
         await db.update_user(deal['sender_id'], deals_count=sender['deals_count'] + 1)
         await db.update_user(deal['recipient_id'], deals_count=recipient['deals_count'] + 1)
 
         await db.conn.commit()
         await db.update_deal_status(deal_id, 'success')
 
-        # Проверяем достижения после сделки
         await db.check_achievements(deal['sender_id'])
         await db.check_achievements(deal['recipient_id'])
 
@@ -620,7 +546,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_clan_creation(user_id: int, nick: str, clan_name: str) -> Optional[Dict]:
-        """Создание клана"""
         user = await db.get_user(user_id)
         if user['influence'] < CLAN_CREATION_COST:
             return {'type': 'clan_error', 'error': 'not_enough_influence', 'required': CLAN_CREATION_COST}
@@ -631,10 +556,8 @@ class GameLogic:
         if existing:
             return {'type': 'clan_error', 'error': 'name_exists', 'name': clan_name}
 
-        # Вычитаем влияние
         await db.conn.execute("UPDATE users SET influence = influence - ? WHERE id = ?", (CLAN_CREATION_COST, user_id))
         clan = await db.create_clan(clan_name, user_id)
-        # Клан получает в казну затраченное влияние
         await db.update_clan(clan['id'], influence_treasury=CLAN_CREATION_COST)
         await db.conn.commit()
 
@@ -642,22 +565,15 @@ class GameLogic:
 
     @staticmethod
     async def _handle_aura_buy(user_id: int, nick: str, amount: float) -> Optional[Dict]:
-        """Покупка ауры: рыночная цена (без дюпа)"""
         if amount <= 0 or amount > 10000:
             return {'type': 'aura_error', 'error': 'invalid_amount'}
             
         user = await db.get_user(user_id)
         
-        # Получаем текущие показатели системы
         total_influence = await db.get_total_system_influence()
         total_aura = await db.get_total_aura_in_circulation()
-        
-        # Рыночная цена: (влияние всей системы) / (аура в обороте)
-        # После покупки цена вырастет, так как аура в обороте увеличится
         current_price = await db.get_current_aura_price()
         
-        # Рассчитываем стоимость по средней цене между текущей и будущей
-        # Будущая цена = новое общее влияние / новое общее количество ауры
         new_total_influence = total_influence
         new_total_aura = total_aura + amount
         
@@ -666,20 +582,17 @@ class GameLogic:
         else:
             future_price = current_price * 1.1
             
-        # Средняя цена для защиты от дюпа
         avg_price = (current_price + future_price) / 2
         cost = int(amount * avg_price)
         
         if user['influence'] < cost:
             return {'type': 'aura_error', 'error': 'not_enough_influence', 'required': cost}
 
-        # Выполняем перевод
         await db.conn.execute(
             "UPDATE users SET influence = influence - ?, aura = aura + ? WHERE id = ?",
             (cost, amount, user_id)
         )
         
-        # Устанавливаем новую рыночную цену
         new_price = future_price
         if new_price < MIN_AURA_PRICE:
             new_price = MIN_AURA_PRICE
@@ -698,7 +611,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_aura_sell(user_id: int, nick: str, amount: float) -> Optional[Dict]:
-        """Продажа ауры: рыночная цена (без дюпа)"""
         if amount <= 0 or amount > 10000:
             return {'type': 'aura_error', 'error': 'invalid_amount'}
             
@@ -707,13 +619,10 @@ class GameLogic:
         if user['aura'] < amount:
             return {'type': 'aura_error', 'error': 'not_enough_aura', 'required': amount}
         
-        # Получаем текущие показатели системы
         total_influence = await db.get_total_system_influence()
         total_aura = await db.get_total_aura_in_circulation()
-        
         current_price = await db.get_current_aura_price()
         
-        # Рассчитываем будущую цену после продажи
         new_total_aura = total_aura - amount
         
         if new_total_aura > 0:
@@ -721,7 +630,6 @@ class GameLogic:
         else:
             future_price = current_price * 0.9
             
-        # Средняя цена для защиты от дюпа
         avg_price = (current_price + future_price) / 2
         gain = int(amount * avg_price)
         
@@ -730,7 +638,6 @@ class GameLogic:
             (amount, gain, user_id)
         )
         
-        # Устанавливаем новую рыночную цену
         new_price = future_price
         if new_price < MIN_AURA_PRICE:
             new_price = MIN_AURA_PRICE
@@ -749,7 +656,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_alliance_creation(user_id: int, nick: str, target_clan_name: str, message_text: str) -> Optional[Dict]:
-        """Создание альянса"""
         user = await db.get_user(user_id)
         if not user['clan_id']:
             return {'type': 'alliance_error', 'error': 'not_in_clan'}
@@ -773,7 +679,6 @@ class GameLogic:
             return {'type': 'alliance_error', 'error': 'already_allied', 'name': target_clan['name']}
 
         await db.create_alliance(user_clan['id'], target_clan['id'])
-        # Увеличиваем счётчик альянсов у лидера (для достижений)
         await db.update_user(user_id, alliances_count=user['alliances_count'] + 1)
 
         return {
@@ -785,7 +690,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_war_declaration(user_id: int, nick: str, target_clan_name: str) -> Optional[Dict]:
-        """Объявление войны"""
         user = await db.get_user(user_id)
         if not user['clan_id']:
             return {'type': 'war_error', 'error': 'not_in_clan'}
@@ -794,7 +698,6 @@ class GameLogic:
         if not attacker_clan:
             return {'type': 'war_error', 'error': 'clan_not_found'}
 
-        # Проверяем, является ли пользователь лидером или офицером
         is_leader = attacker_clan['leader_id'] == user_id
         is_officer = await db.has_clan_role(user_id, attacker_clan['id'], 'officer')
         if not (is_leader or is_officer):
@@ -811,7 +714,6 @@ class GameLogic:
         if existing_war:
             return {'type': 'war_error', 'error': 'already_at_war', 'name': defender_clan['name']}
 
-        # Проверка альянса
         alliances = await db.get_clan_alliances(attacker_clan['id'])
         if defender_clan['id'] in alliances:
             return {'type': 'war_error', 'error': 'cannot_war_alliance', 'name': defender_clan['name']}
@@ -819,7 +721,6 @@ class GameLogic:
         if attacker_clan['influence_treasury'] < WAR_DECLARE_COST:
             return {'type': 'war_error', 'error': 'not_enough_treasury', 'required': WAR_DECLARE_COST}
 
-        # Списываем стоимость
         await db.update_clan(attacker_clan['id'], influence_treasury=attacker_clan['influence_treasury'] - WAR_DECLARE_COST)
         war = await db.declare_war(attacker_clan['id'], defender_clan['id'])
 
@@ -833,12 +734,10 @@ class GameLogic:
 
     @staticmethod
     async def _handle_war_attack(user_id: int, nick: str, target_nick: str, message_text: str) -> Optional[Dict]:
-        """Атака в войне"""
         user = await db.get_user(user_id)
         if not user['clan_id']:
             return {'type': 'war_attack_error', 'error': 'not_in_clan'}
 
-        # Находим цель по нику или username
         async with db.conn.execute(
             "SELECT * FROM users WHERE username = ? OR nickname = ?",
             (target_nick, target_nick)
@@ -861,9 +760,8 @@ class GameLogic:
         if not await db.check_cooldown(user_id, target['id'], 'war_attack', WAR_ATTACK_COOLDOWN):
             return {'type': 'war_attack_error', 'error': 'cooldown'}
 
-        # Рассчитываем урон: база + бонус от военного улучшения клана
         military_level = await db.get_clan_upgrade_level(user['clan_id'], 'military')
-        damage_bonus = 1.0 + military_level * 0.1  # +10% за уровень
+        damage_bonus = 1.0 + military_level * 0.1
         damage = int((user['influence'] * 0.1 + user['trust'] * 2) * damage_bonus)
         if damage < 1:
             damage = 1
@@ -871,7 +769,6 @@ class GameLogic:
         await db.record_war_attack(war['id'], user_id, target['id'], damage)
         await db.set_cooldown(user_id, target['id'], 'war_attack')
 
-        # Атакующий тратит влияние
         cost = max(1, int(user['influence'] * 0.05))
         await db.add_influence(user_id, -cost)
 
@@ -886,7 +783,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_karma(from_user: int, from_nick: str, target_nick: str, value: int) -> Optional[Dict]:
-        """Поставить карму (+1 или -1)"""
         if value not in (1, -1):
             return {'type': 'karma_error', 'error': 'invalid_value'}
 
@@ -917,7 +813,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_deposit(user_id: int, nick: str, amount: int, days: int) -> Optional[Dict]:
-        """Создать вклад"""
         if amount <= 0:
             return {'type': 'deposit_error', 'error': 'invalid_amount'}
         if days < 1:
@@ -941,7 +836,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_loan(user_id: int, nick: str, amount: int, collateral: float) -> Optional[Dict]:
-        """Взять кредит"""
         if amount <= 0:
             return {'type': 'loan_error', 'error': 'invalid_amount'}
 
@@ -949,7 +843,6 @@ class GameLogic:
         if collateral > user['aura']:
             return {'type': 'loan_error', 'error': 'not_enough_collateral'}
 
-        # Проверяем, есть ли активные кредиты (не больше 1)
         async with db.conn.execute(
             "SELECT 1 FROM loans WHERE user_id = ? AND status = 'active'",
             (user_id,)
@@ -957,7 +850,7 @@ class GameLogic:
             if await cursor.fetchone():
                 return {'type': 'loan_error', 'error': 'already_has_loan'}
 
-        success = await db.create_loan(user_id, amount, collateral, 7)  # срок 7 дней
+        success = await db.create_loan(user_id, amount, collateral, 7)
         if not success:
             return {'type': 'loan_error', 'error': 'creation_failed'}
 
@@ -972,7 +865,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_espionage(user_id: int, nick: str, target_clan_name: str) -> Optional[Dict]:
-        """Отправить шпиона"""
         user = await db.get_user(user_id)
         if not user['clan_id']:
             return {'type': 'espionage_error', 'error': 'not_in_clan'}
@@ -981,7 +873,6 @@ class GameLogic:
         if not from_clan:
             return {'type': 'espionage_error', 'error': 'clan_not_found'}
 
-        # Только лидер или офицер
         is_leader = from_clan['leader_id'] == user_id
         is_officer = await db.has_clan_role(user_id, from_clan['id'], 'officer')
         if not (is_leader or is_officer):
@@ -994,12 +885,11 @@ class GameLogic:
         if to_clan['id'] == from_clan['id']:
             return {'type': 'espionage_error', 'error': 'self_espionage'}
 
-        # Проверяем, не в альянсе
         alliances = await db.get_clan_alliances(from_clan['id'])
         if to_clan['id'] in alliances:
             return {'type': 'espionage_error', 'error': 'cannot_spy_alliance'}
 
-        cost = 150  # фиксированная стоимость шпионажа
+        cost = 150
         if from_clan['influence_treasury'] < cost:
             return {'type': 'espionage_error', 'error': 'not_enough_treasury', 'required': cost}
 
@@ -1016,8 +906,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_tournament_join(user_id: int, nick: str) -> Optional[Dict]:
-        """Присоединиться к активному турниру"""
-        # Ищем активный турнир
         async with db.conn.execute(
             "SELECT * FROM tournaments WHERE status = 'active' AND start_time <= datetime('now') AND end_time >= datetime('now')"
         ) as cursor:
@@ -1034,8 +922,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_invite(user_id: int, inviter_nick: str, target_nick: str, chat_id: int) -> Optional[Dict]:
-        """Приглашение нового игрока (новичка)"""
-        # Ищем цель по нику
         async with db.conn.execute(
             "SELECT * FROM users WHERE username = ? OR nickname = ?",
             (target_nick, target_nick)
@@ -1048,19 +934,16 @@ class GameLogic:
         if target['id'] == user_id:
             return {'type': 'invite_error', 'error': 'self_invite'}
 
-        # Проверяем, не приглашал ли уже
         existing = await db.get_invite_info(target['id'])
         if existing:
             return {'type': 'invite_error', 'error': 'already_invited'}
 
-        # Проверяем, является ли цель "новичком" (influence < 50)
         if target['influence'] >= 50:
             return {'type': 'invite_error', 'error': 'not_newbie'}
 
         await db.create_invite(user_id, target['id'])
         await db.update_user(target['id'], invited_by=user_id, invite_time=datetime.now().isoformat())
 
-        # Отправляем событие с текущим прогрессом (0 сообщений)
         invite_info = await db.get_invite_info(target['id'])
         return {
             'type': 'newbie_invite',
@@ -1071,7 +954,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_roulette(user_id: int, nick: str, bet_type: str, bet_amount: int) -> Optional[Dict]:
-        """Рулетка - чёт/нечёт"""
         if bet_amount < ROULETTE_MIN_BET:
             return {'type': 'roulette_error', 'error': 'min_bet', 'min': ROULETTE_MIN_BET}
         
@@ -1091,11 +973,9 @@ class GameLogic:
 
     @staticmethod
     async def _handle_duel(user_id: int, nick: str, target_nick: str, bet_amount: int) -> Optional[Dict]:
-        """Дуэль между игроками"""
         if bet_amount < DUEL_MIN_STAKE:
             return {'type': 'duel_error', 'error': 'min_stake', 'min': DUEL_MIN_STAKE}
         
-        # Ищем цель
         async with db.conn.execute(
             "SELECT * FROM users WHERE username = ? OR nickname = ?", (target_nick, target_nick)
         ) as cursor:
@@ -1114,7 +994,6 @@ class GameLogic:
         if target['influence'] < bet_amount:
             return {'type': 'duel_error', 'error': 'target_not_enough'}
         
-        # Списываем ставки
         await db.conn.execute(
             "UPDATE users SET influence = influence - ? WHERE id = ?", (bet_amount, user_id)
         )
@@ -1135,7 +1014,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_investment(user_id: int, nick: str, amount: int) -> Optional[Dict]:
-        """Инвестиции"""
         if amount < INVESTMENT_MIN:
             return {'type': 'investment_error', 'error': 'min_amount', 'min': INVESTMENT_MIN}
         
@@ -1154,8 +1032,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_lottery(user_id: int, nick: str) -> Optional[Dict]:
-        """Лотерея - купить билет"""
-        # Получаем текущий раунд
         current_hour = datetime.now().hour
         round_number = datetime.now().year * 10000 + datetime.now().month * 100 + current_hour
         
@@ -1176,7 +1052,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_future(user_id: int, nick: str, amount: float) -> Optional[Dict]:
-        """Фьючерс на ауру"""
         if amount < FUTURES_MIN_AMOUNT:
             return {'type': 'future_error', 'error': 'min_amount', 'min': FUTURES_MIN_AMOUNT}
         
@@ -1199,7 +1074,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_insurance(user_id: int, nick: str, coverage: int) -> Optional[Dict]:
-        """Страховка от потери влияния"""
         premium = int(coverage * INSURANCE_PREMIUM_RATE)
         
         insurance = await db.buy_insurance(user_id, coverage, premium)
@@ -1215,7 +1089,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_racket(user_id: int, nick: str, target_nick: str, amount: int) -> Optional[Dict]:
-        """Рэкет - наехать на игрока"""
         async with db.conn.execute(
             "SELECT * FROM users WHERE username = ? OR nickname = ?", (target_nick, target_nick)
         ) as cursor:
@@ -1252,7 +1125,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_protection(user_id: int, nick: str, target_clan_name: str) -> Optional[Dict]:
-        """Крышевание - защита слабого клана"""
         user = await db.get_user(user_id)
         if not user['clan_id']:
             return {'type': 'protection_error', 'error': 'not_in_clan'}
@@ -1266,7 +1138,6 @@ class GameLogic:
         if target_clan['id'] == user_clan['id']:
             return {'type': 'protection_error', 'error': 'self_protection'}
         
-        # Создаём защиту
         protection = await db.create_protection(target_clan['id'], user_clan['id'], PROTECTION_COST_PER_DAY)
         
         return {
@@ -1278,7 +1149,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_showdown(user_id: int, nick: str, target_nick: str) -> Optional[Dict]:
-        """Разборки - вызов на стрелку"""
         async with db.conn.execute(
             "SELECT * FROM users WHERE username = ? OR nickname = ?", (target_nick, target_nick)
         ) as cursor:
@@ -1297,7 +1167,6 @@ class GameLogic:
         if target['influence'] < SHOWDOWN_STAKE:
             return {'type': 'showdown_error', 'error': 'target_not_enough'}
         
-        # Списываем ставки
         await db.conn.execute(
             "UPDATE users SET influence = influence - ? WHERE id = ?", (SHOWDOWN_STAKE, user_id)
         )
@@ -1318,7 +1187,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_clan_wedding(user_id: int, nick: str, target_clan_name: str) -> Optional[Dict]:
-        """Свадьба кланов"""
         user = await db.get_user(user_id)
         if not user['clan_id']:
             return {'type': 'wedding_error', 'error': 'not_in_clan'}
@@ -1337,7 +1205,6 @@ class GameLogic:
         if user_clan['influence_treasury'] < CLAN_WEDDING_COST:
             return {'type': 'wedding_error', 'error': 'not_enough_treasury'}
         
-        # Списываем стоимость
         await db.update_clan(user_clan['id'], influence_treasury=user_clan['influence_treasury'] - CLAN_WEDDING_COST)
         
         wedding = await db.propose_clan_wedding(user_clan['id'], target_clan['id'], user_id, CLAN_WEDDING_COST)
@@ -1351,7 +1218,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_clan_boss_attack(user_id: int, nick: str) -> Optional[Dict]:
-        """Атака клан-босса"""
         boss = await db.get_active_boss()
         if not boss:
             return {'type': 'boss_error', 'error': 'no_active_boss'}
@@ -1370,7 +1236,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_clan_exchange(user_id: int, nick: str, from_type: str, amount: float) -> Optional[Dict]:
-        """Обмен внутри клана"""
         user = await db.get_user(user_id)
         if not user['clan_id']:
             return {'type': 'exchange_error', 'error': 'not_in_clan'}
@@ -1389,7 +1254,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_donor_transfer(user_id: int, nick: str, target_nick: str, amount: int) -> Optional[Dict]:
-        """День донора - передача влияния без сделки"""
         async with db.conn.execute(
             "SELECT * FROM users WHERE username = ? OR nickname = ?", (target_nick, target_nick)
         ) as cursor:
@@ -1413,7 +1277,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_set_birthday(user_id: int, nick: str, birthday: str) -> Optional[Dict]:
-        """Установить день рождения"""
         await db.set_birthday(user_id, birthday)
         
         return {
@@ -1424,7 +1287,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_birthday_wish(user_id: int, nick: str, target_nick: str) -> Optional[Dict]:
-        """Поздравить с днём рождения"""
         async with db.conn.execute(
             "SELECT * FROM users WHERE username = ? OR nickname = ?", (target_nick, target_nick)
         ) as cursor:
@@ -1435,7 +1297,6 @@ class GameLogic:
         
         target = dict(target)
         
-        # Проверяем, день ли сегодня
         birthday_users = await db.get_birthday_users()
         birthday_ids = [u['user_id'] for u in birthday_users]
         
@@ -1452,7 +1313,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_season_info() -> Optional[Dict]:
-        """Информация о сезоне"""
         season = await db.get_active_season()
         if not season:
             return {'type': 'season_info', 'text': 'Сезонов сейчас нет активных'}
@@ -1470,7 +1330,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_goals_info(user_id: int) -> Optional[Dict]:
-        """Информация о личных целях"""
         goals = await db.get_user_goals(user_id)
         if not goals:
             return {'type': 'goals_info', 'text': 'У вас нет активных целей. Они появятся в новом сезоне!'}
@@ -1484,7 +1343,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_titles_info(user_id: int) -> Optional[Dict]:
-        """Информация о титулах"""
         titles = await db.get_user_titles(user_id)
         if not titles:
             return {'type': 'titles_info', 'text': 'У вас пока нет титулов. Достигните целей!'}
@@ -1498,7 +1356,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_title_select(user_id: int, title_name: str) -> Optional[Dict]:
-        """Выбрать активный титул"""
         titles = await db.get_user_titles(user_id)
         
         for t in titles:
@@ -1510,7 +1367,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_authority_info(user_id: int) -> Optional[Dict]:
-        """Информация об авторитете"""
         auth = await db.get_authority(user_id)
         
         ranks = {
@@ -1529,7 +1385,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_clan_event_info() -> Optional[Dict]:
-        """Информация о клановом ивенте"""
         event = await db.get_active_clan_event()
         if not event:
             return {'type': 'clan_event_info', 'text': 'Сейчас нет активных клановых ивентов'}
@@ -1546,7 +1401,6 @@ class GameLogic:
 
     @staticmethod
     async def _handle_secret_command(user_id: int, trigger: str) -> Optional[Dict]:
-        """Секретные команды"""
         secret = await db.get_secret_response(trigger)
         if not secret:
             return None
@@ -1570,7 +1424,6 @@ class GameLogic:
 
     @staticmethod
     async def get_events_text() -> str:
-        """Получить информацию об активных событиях"""
         active_event = await db.get_active_event()
         if not active_event:
             return (
@@ -1604,7 +1457,6 @@ class GameLogic:
 
     @staticmethod
     async def get_black_market_text() -> str:
-        """Получить информацию о черном рынке"""
         active_event = await db.get_active_event()
         
         if active_event and active_event['event_type'] == 'black_market':
@@ -1633,7 +1485,6 @@ class GameLogic:
 
     @staticmethod
     async def get_profile_text(user_id: int) -> str:
-        """Получить профиль пользователя"""
         user = await db.get_user(user_id)
         if not user:
             return "❌ Пользователь не найден."
@@ -1666,7 +1517,6 @@ class GameLogic:
 
     @staticmethod
     async def get_top_text() -> str:
-        """Получить топ игроков"""
         top_inf = await db.get_top_influence(5)
         top_tr = await db.get_top_trust(5)
         top_au = await db.get_top_aura(5)
@@ -1693,7 +1543,6 @@ class GameLogic:
 
     @staticmethod
     def get_help_text() -> str:
-        """Получить справку"""
         return (
             "🎮 <b>Правила игры</b>\n"
             "━━━━━━━━━━━━━━━\n\n"
@@ -1754,7 +1603,6 @@ class GameLogic:
 
     @staticmethod
     async def get_clan_profile_text(clan_id: int) -> str:
-        """Получить профиль клана"""
         clan = await db.get_clan(clan_id)
         if not clan:
             return "❌ Клан не найден."
@@ -1808,7 +1656,6 @@ class GameLogic:
 
     @staticmethod
     async def get_clan_power_rating_text(limit: int = 10) -> str:
-        """Получить рейтинг силы кланов"""
         top_clans = await db.get_clans_by_power(limit)
         text = "⚔️ <b>РЕЙТИНГ СИЛЫ КЛАНОВ</b> ⚔️\n━━━━━━━━━━━━━━━\n\n"
         for i, clan in enumerate(top_clans, 1):
@@ -1826,7 +1673,6 @@ class GameLogic:
 
     @staticmethod
     async def get_war_status_text(war_id: int) -> str:
-        """Получить статус войны"""
         async with db.conn.execute(
             """SELECT w.*, 
                       c1.name as clan1_name, 
@@ -1866,7 +1712,6 @@ class GameLogic:
 
     @staticmethod
     async def get_achievements_text(user_id: int) -> str:
-        """Получить достижения"""
         user = await db.get_user(user_id)
         if not user:
             return "❌ Пользователь не найден."
@@ -1897,7 +1742,6 @@ class GameLogic:
 
     @staticmethod
     async def get_level_text(user_id: int) -> str:
-        """Получить уровень"""
         user = await db.get_user(user_id)
         if not user:
             return "❌ Пользователь не найден."
@@ -1917,7 +1761,6 @@ class GameLogic:
 
     @staticmethod
     async def check_expired_deals() -> List[Dict]:
-        """Проверить просроченные сделки"""
         expired = await db.get_expired_deals()
         events = []
         for deal in expired:
@@ -1933,7 +1776,6 @@ class GameLogic:
 
     @staticmethod
     async def finish_wars_periodically():
-        """Проверка завершившихся войн (вызывать раз в минуту из фоновой задачи)"""
         async with db.conn.execute(
             "SELECT * FROM wars WHERE status = 'active' AND ends_at <= datetime('now')"
         ) as cursor:
@@ -1942,7 +1784,6 @@ class GameLogic:
             war = dict(row)
             result = await db.finish_war(war['id'])
             if result:
-                # Увеличиваем счётчик побед участникам победившего клана (для достижений)
                 winner_members = await db.get_clan_members(result['winner_id'])
                 for member in winner_members:
                     await db.update_user(member['id'], war_wins=member['war_wins'] + 1)
