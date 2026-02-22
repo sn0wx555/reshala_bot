@@ -1,3 +1,6 @@
+class Database:
     def __init__(self):
-        # Initialize the database path for persistent storage
-        self.db_path = '/var/data/bot_database.db'  # Updated path
+        self.db_path = '/var/data/bot_database.db'  # Updated persistent disk path
+        # Additional initialization code...
+
+    # Other methods for the Database class...
