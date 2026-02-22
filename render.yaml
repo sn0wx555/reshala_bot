@@ -1,0 +1,10 @@
+# Render Deployment Configuration
+
+# Configuration for persistent disk on Render
+
+persistent_disks:
+  - size: 50Gi 
+    type: pd-standard
+    name: my-disk
+    mount_path: /mnt/my-disk
+
